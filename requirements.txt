@@ -1,0 +1,7 @@
+# CloudGuard Core Dependencies
+boto3>=1.34.0
+botocore>=1.34.0
+jinja2>=3.1.0
+
+# Testing and Development
+pytest>=8.0.0
