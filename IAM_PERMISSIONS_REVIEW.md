@@ -176,3 +176,19 @@ At the time of this review:
 - Live AWS validation remains pending.
 
 **Next milestone:** Review the permissions and error-handling behavior with the team before attempting a live AWS audit.
+
+---
+
+### Read-Only Wrapper Limitations
+
+The application-level read-only wrapper is a convenience safeguard, **not a guaranteed security boundary**.
+
+- The wrapper uses an operation-name prefix allowlist (`get_`, `list_`, and `describe_`), which may block some legitimate read-only API operations and does not prove that every allowed operation is harmless.
+- The underlying boto3 client is accessible through the wrapper's internal `_raw_client` attribute, which can bypass the operation checks.
+- `get_waiter` exposes the underlying client's waiter functionality without an equivalent operation-level validation.
+- The defined `MUTATING_KEYWORDS` list is currently unused.
+- The wrapper's default profile (`cloudguard`) and region (`ap-south-1`) do not, by themselves, enforce AWS permissions or prove which identity is being used.
+
+**Required security control:** Restrict the dedicated audit identity using an independently reviewed AWS IAM policy with only the necessary permissions. Do not rely on the Python wrapper alone to prevent modifications.
+
+**Status:** Wrapper limitations identified; remediation and live AWS validation remain pending. No live AWS validation is implied by the offline test results.
