@@ -1,4 +1,4 @@
-# CloudGuard Architecture Document
+﻿# CloudGuard Architecture Document
 
 CloudGuard is a lightweight, read-only Cloud Security Posture Management (CSPM) tool built with Python (`boto3`) and Jinja2. It audits an AWS account for security misconfigurations across storage, identity, networking, and logging, applies a transparent mathematical risk score to each finding, maps issues to the CIS AWS Foundations Benchmark, and outputs an actionable, executive HTML report.
 
@@ -21,16 +21,16 @@ flowchart TD
 
     Guard --> Scanners
     Scanners --> Findings["Normalized Finding Objects (models.py)"]
-    
+
     Findings --> Scoring["Risk Scoring Engine (scoring.py)"]
     Findings --> CIS["CIS Benchmark Mapping (cis_mapping.py)"]
-    
+
     Scoring --> RankedFindings["Scored & Ranked Findings"]
     CIS --> RankedFindings
-    
+
     RankedFindings --> Report["HTML Report Generator (report.py)"]
     Report --> HTML["reports/audit_report.html"]
-    
+
     subgraph Validation ["Automated Validation Testbed"]
         TF["Terraform Testbed (terraform/)"] --> AWS
         RankedFindings --> ValScript["Validator Script (tests/validate.py)"]
@@ -50,7 +50,7 @@ flowchart TD
 | `cloudguard/scanners/iam_scanner.py` | **Identity Audit**: Audits wildcard permissions (`*:*`), root account usage, IAM users without MFA, old/inactive access keys (>90 days), and overprivileged IAM roles. |
 | `cloudguard/scanners/sg_scanner.py` | **Network Perimeter Audit**: Analyzes EC2 Security Group ingress rules to detect `0.0.0.0/0` exposure on sensitive ports (SSH 22, RDP 3389, MySQL 3306, PostgreSQL 5432, MSSQL 1433, MongoDB 27017). |
 | `cloudguard/scanners/monitoring_scanner.py` | **Observability Audit**: Checks whether CloudTrail is enabled across all regions with log file validation, and checks for critical CloudWatch metric alarms. |
-| `cloudguard/scoring.py` | **Prioritization Engine**: Calculates numeric risk scores using the formula: `Risk Score = Severity × Exposure × Resource Sensitivity`. Sorts findings in descending order. |
+| `cloudguard/scoring.py` | **Prioritization Engine**: Calculates numeric risk scores using the formula: `Risk Score = Severity Ã— Exposure Ã— Resource Sensitivity`. Sorts findings in descending order. |
 | `cloudguard/cis_mapping.py` | **Compliance Tagging**: Maps each implemented check to official CIS AWS Foundations Benchmark control IDs (e.g., CIS-1.16, CIS-2.1.1, CIS-5.2). |
 | `cloudguard/report.py` | **Report Presentation**: Renders an interactive, standalone HTML audit report using Jinja2 templates, detailing executive statistics, risk breakdown, raw evidence, and AWS CLI/Terraform remediation steps. |
 | `cloudguard/main.py` | **CLI Orchestrator**: CLI entry point accepting arguments (`--profile`, `--region`, `--smoke-test`, `--output`), orchestrating the scan pipeline end-to-end. |
@@ -121,32 +121,51 @@ $$\text{Risk Score} = \text{Severity Weight} \times \text{Exposure Multiplier} \
 
 ## 5. Read-Only Safety Design (Defense-in-Depth)
 
-A common examiner question during project viva is:
-> *"How does your tool ensure it never destroys or mutates resources in the student AWS account?"*
+A common examiner question is:
 
-CloudGuard enforces safety through three defense-in-depth layers:
+> "How does CloudGuard reduce the risk of accidentally modifying resources in the AWS account?"
+
+CloudGuard is designed for read-only auditing and uses multiple safeguards to reduce this risk.
 
 1. **Code-Level Proxy Wrapper (`ReadOnlyClientWrapper`)**:
-   Every `boto3` client is wrapped before exposure. Any call whose method name does not begin with `get_`, `list_`, or `describe_` immediately raises a `ReadOnlyViolationError` and halts before sending an HTTP request.
-2. **Explicit Operation Whitelisting**:
-   Mutating prefixes (`create`, `put`, `delete`, `update`, `modify`, `attach`, `authorize`, `revoke`) are permanently forbidden.
-3. **Paginator Inspection**:
-   Calls to `client.get_paginator(operation_name)` inspect the requested operation to ensure it is strictly read-only.
-4. **Credential Isolation**:
-   Credentials are never hardcoded, printed, or exported. CloudGuard relies solely on the named AWS profile `cloudguard` stored safely in standard AWS credential locations.
+   The wrapper allows operations whose method names begin with `get_`, `list_`, or `describe_`. Other client operations are rejected with a `ReadOnlyViolationError`. This is a code-level safeguard, not an absolute security boundary.
+
+2. **Operation Restrictions**:
+   The wrapper restricts client operations through an allowlist of method-name prefixes. Some legitimate read-only AWS operations may also be blocked if they do not use the permitted prefixes.
+
+3. **Paginator Restrictions**:
+   The wrapper checks paginator operation names before returning a paginator. This adds another safeguard but does not guarantee that every possible access path is read-only.
+
+4. **AWS IAM Permissions**:
+   The AWS identity used for auditing should have only the permissions required to inspect the target resources. AWS-side permissions provide an essential layer of protection even if application-level safeguards are bypassed or incomplete.
+
+5. **Credential Handling**:
+   Credentials must not be hardcoded, printed, or committed to the repository. CloudGuard uses standard AWS credential mechanisms, such as a named profile, for local execution.
+
+**Important limitation:** The wrapper is not a substitute for restrictive AWS IAM permissions. Its implementation has potential bypass paths, so live audits must use an appropriately restricted identity and must not rely on the wrapper alone to prevent changes to AWS resources.
 
 ---
 
 ## 6. Validation & Testing Approach
 
-1. **Unit & Smoke Tests (`tests/smoke_test.py`)**:
-   - Tests the `ReadOnlyClientWrapper` by deliberately invoking forbidden methods (`delete_bucket`, `create_role`) against a mock client and asserting rejection.
-   - Verifies the `Finding` dataclass serialization.
-   - Tests STS connectivity (`sts.get_caller_identity`) against the configured profile.
-2. **Ground Truth Validation (`tests/validate.py` & `tests/expected_findings.json`)**:
-   - Deploys deliberate, Free-Tier-safe misconfigurations in AWS using Terraform.
-   - Executes CloudGuard against the live AWS account.
-   - Compares detected findings against `expected_findings.json`.
-   - Computes:
-     $$\text{Recall} = \frac{\text{Detected Planted Findings}}{\text{Total Planted Findings}}$$
-     $$\text{Precision} = \frac{\text{True Positives}}{\text{Total Detected Findings}}$$
+CloudGuard uses two stages of validation: offline testing, which is implemented, and live AWS integration testing, which is planned.
+
+1. **Automated Tests (`tests/`)**
+   - Tests scanner behaviour, risk scoring, CIS mapping, HTML reporting, pipeline handling, and validation logic.
+   - Uses synthetic boto3 client mocks to test AWS responses without deploying resources.
+   - The smoke test `tests/smoke_test.py::test_aws_sts_connectivity` may contact AWS STS if valid credentials are configured.
+
+2. **Offline Ground Truth Validation (`tests/validate.py` and `tests/expected_findings.json`)**
+   - Runs the actual scanners against synthetic, mocked AWS responses representing known security misconfigurations and compliant resources.
+   - Compares detected findings with the expected findings.
+   - Computes true positives (TP), false positives (FP), false negatives (FN), precision, and recall.
+   - Current synthetic validation result: 14 expected findings, 14 matched findings, 100% precision and 100% recall in the mock environment. These results do not establish live AWS detection accuracy.
+
+3. **Planned Live AWS Integration Validation**
+   - Review and approve the Terraform testbed before deployment; it contains deliberately insecure test resources.
+   - Configure a dedicated AWS identity with only the permissions required for CloudGuard's audit.
+   - Deploy the test resources only in a controlled, authorized test environment after reviewing security and potential costs.
+   - Run CloudGuard against the test environment and compare its findings with a documented ground truth.
+   - Record live precision, recall, missed findings, unexpected findings, and any integration failures separately from offline test results.
+
+Live AWS validation is a future integration step and has not been established by the offline validator alone.
