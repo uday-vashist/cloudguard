@@ -79,7 +79,7 @@ CloudGuard uses code-level safeguards to reduce the risk of accidental modificat
 ### 1. Setup Virtual Environment
 ```powershell
 # Navigate to project root
-cd C:\Users\SOUMYA\Documents\cloudguard
+cd cloudguard
 
 # Create virtual environment
 python -m venv .venv
@@ -112,6 +112,7 @@ python -m cloudguard.main [OPTIONS]
 
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `--demo` | flag | `False` | Run audit in offline demonstration mode using synthetic testbed (no AWS credentials or verification required) |
 | `--profile` | `str` | `"cloudguard"` | Named AWS CLI profile in `~/.aws/credentials` |
 | `--region` | `str` | `"ap-south-1"` | AWS region to audit |
 | `--smoke-test` | flag | `False` | Verifies STS `get_caller_identity` and read-only session setup |
@@ -119,14 +120,22 @@ python -m cloudguard.main [OPTIONS]
 
 ### Example Commands
 
-#### A. Run Smoke Test (Verify AWS Connectivity)
-Validates STS identity without running scanners:
+#### A. Run Offline Audit Demo (No AWS Credentials or Verification Required)
+Executes all four scanners against the mock testbed, scores findings, tags CIS controls, and generates HTML report:
 ```powershell
-.\.venv\Scripts\python.exe -m cloudguard.main --smoke-test --profile my-profile --region ap-south-1
+.\.venv\Scripts\python.exe -m cloudguard.main --demo
 ```
 
-#### B. Run Full Security Audit
-Executes all four scanners, scores findings, tags CIS controls, and generates HTML report:
+#### B. Run Smoke Test (Verify Authentication)
+Validates STS identity without running scanners (use `--demo` for simulated check):
+```powershell
+.\.venv\Scripts\python.exe -m cloudguard.main --smoke-test --demo
+# Or against live AWS:
+.\.venv\Scripts\python.exe -m cloudguard.main --smoke-test --profile cloudguard --region ap-south-1
+```
+
+#### C. Run Live AWS Security Audit
+Executes all four scanners against an authorized live AWS account:
 ```powershell
 .\.venv\Scripts\python.exe -m cloudguard.main --profile my-profile --region ap-south-1 --output reports/audit_report.html
 ```

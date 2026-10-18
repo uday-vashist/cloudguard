@@ -68,7 +68,15 @@ class ReadOnlyClientWrapper:
         """Validate whether an operation is strictly read-only."""
         op_lower = operation_name.lower()
 
-        # Check if operation starts with allowed read-only prefixes
+        # 1. Check for explicitly blocked mutating actions
+        for keyword in MUTATING_KEYWORDS:
+            if op_lower.startswith(keyword) or f"_{keyword}" in op_lower:
+                raise ReadOnlyViolationError(
+                    f"[CloudGuard Read-Only Guard] Blocked mutating operation '{operation_name}' on AWS {self._service_name} client. "
+                    f"CloudGuard strictly prohibits write/mutation actions ('{keyword}')."
+                )
+
+        # 2. Check if operation starts with allowed read-only prefixes
         is_read_only = any(op_lower.startswith(prefix) for prefix in ALLOWED_METHOD_PREFIXES)
 
         if not is_read_only:
@@ -94,12 +102,26 @@ class ReadOnlyClientWrapper:
 
         return wrapped_get_paginator
 
+    def _wrap_waiter(self, original_get_waiter: Callable) -> Callable:
+        """Ensure waiters only wait on non-destructive states."""
+        def wrapped_get_waiter(waiter_name: str, *args, **kwargs):
+            w_lower = waiter_name.lower()
+            if any(term in w_lower for term in ("delete", "terminate", "destroy")):
+                raise ReadOnlyViolationError(
+                    f"[CloudGuard Read-Only Guard] Blocked waiter '{waiter_name}' for destructive operation."
+                )
+            return original_get_waiter(waiter_name, *args, **kwargs)
+
+        return wrapped_get_waiter
+
     def __getattr__(self, name: str) -> Any:
         # Allow internal python attributes and whitelisted client utilities
         if name.startswith("_") or name in ALLOWED_CLIENT_UTILITIES:
             attr = getattr(self._raw_client, name)
             if name == "get_paginator":
                 return self._wrap_paginator(attr)
+            if name == "get_waiter":
+                return self._wrap_waiter(attr)
             return attr
 
         # Check if this is an AWS API operation

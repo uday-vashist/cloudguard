@@ -106,8 +106,8 @@ resource "aws_iam_policy" "scoped_readonly_policy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "s3:GetBucketLocation",
           "s3:ListBucket"
         ]

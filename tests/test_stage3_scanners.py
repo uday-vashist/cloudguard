@@ -283,3 +283,26 @@ def test_iam_scanner_compliant_baseline_produces_zero_findings():
 
     findings = scan_iam(client=mock_iam)
     assert len(findings) == 0, "Compliant least-privilege role must produce ZERO false positive findings!"
+
+
+def test_s3_scanner_raises_on_list_buckets_client_error():
+    """Verify that s3_scanner raises ClientError when list_buckets fails (e.g. AccessDenied)."""
+    mock_s3 = MagicMock()
+    mock_s3.list_buckets.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+        "ListBuckets"
+    )
+    with pytest.raises(ClientError):
+        scan_s3(client=mock_s3)
+
+
+def test_iam_scanner_raises_on_list_users_client_error():
+    """Verify that iam_scanner raises ClientError when list_users fails (e.g. AccessDenied)."""
+    mock_iam = MagicMock()
+    mock_iam.list_users.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+        "ListUsers"
+    )
+    with pytest.raises(ClientError):
+        scan_iam(client=mock_iam)
+

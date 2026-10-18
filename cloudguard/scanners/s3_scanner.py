@@ -236,8 +236,8 @@ def scan_s3(client: Optional[Any] = None, region_name: str = "ap-south-1") -> Li
         buckets_resp = s3_client.list_buckets()
         buckets = buckets_resp.get("Buckets", [])
     except ClientError as e:
-        print(f"[WARN] S3 list_buckets failed: {e}")
-        return findings
+        print(f"[ERROR] S3 list_buckets failed (Unable to evaluate S3 storage): {e}")
+        raise
 
     for b in buckets:
         bucket_name = b.get("Name", "")

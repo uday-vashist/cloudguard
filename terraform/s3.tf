@@ -34,7 +34,7 @@ resource "aws_s3_bucket_public_access_block" "public_policy_bpa" {
 }
 
 resource "aws_s3_bucket_policy" "public_read_policy" {
-  bucket = aws_s3_bucket.public_policy_bucket.id
+  bucket     = aws_s3_bucket.public_policy_bucket.id
   depends_on = [aws_s3_bucket_public_access_block.public_policy_bpa]
 
   policy = jsonencode({

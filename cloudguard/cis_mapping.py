@@ -90,6 +90,7 @@ CHECK_TO_CIS_MAP = {
     "IAM Policy Grants Wildcard Administrative Privileges (*:*)": "CIS-1.16",
     "IAM User Without MFA Enabled": "CIS-1.5",
     "IAM User Has Active Access Key": "CIS-1.14",
+    "IAM User Has Active Access Key Overdue for Rotation (>90 Days)": "CIS-1.14",
     "IAM Role Has Full Administrative Access": "CIS-1.16",
     "CloudTrail Not Enabled In All Regions": "CIS-3.1",
     "No CloudTrail Trails Configured in AWS Account": "CIS-3.1",
@@ -104,7 +105,11 @@ def get_cis_id_for_check(check_name: str) -> str:
     if check_name in CHECK_TO_CIS_MAP:
         return CHECK_TO_CIS_MAP[check_name]
 
-    # 2. Security Group Port matching
+    # 2. Key rotation partial match
+    if "Active Access Key" in check_name:
+        return "CIS-1.14"
+
+    # 3. Security Group Port matching
     if "Port 22 (SSH)" in check_name:
         return "CIS-5.2"
     if "Port 3389 (RDP)" in check_name:

@@ -134,11 +134,46 @@ def check_user_wildcard_policies(iam_client: Any, user_name: str) -> List[Findin
 
 
 def check_user_mfa(iam_client: Any, user_name: str) -> Optional[Finding]:
-    """Check if an active IAM user has MFA devices registered."""
+    """
+    Check if an active IAM user has MFA devices registered.
+    Distinguishes missing devices from API errors and verifies whether
+    console access is enabled before assuming interactive console login.
+    """
     try:
         mfa_resp = iam_client.list_mfa_devices(UserName=user_name)
         mfa_devices = mfa_resp.get("MFADevices", [])
         if not mfa_devices:
+            # Check console access without assuming it
+            console_status = "Unverified"
+            has_console = False
+            try:
+                if hasattr(iam_client, "get_login_profile"):
+                    lp_resp = iam_client.get_login_profile(UserName=user_name)
+                    if isinstance(lp_resp, dict) and "LoginProfile" in lp_resp:
+                        has_console = True
+                        console_status = "Enabled (Console Password Configured)"
+            except ClientError as e:
+                err_code = e.response.get("Error", {}).get("Code", "")
+                if err_code == "NoSuchEntity":
+                    console_status = "Not Configured (Programmatic / API Access Only)"
+                    has_console = False
+                elif err_code == "AccessDenied":
+                    console_status = "Unable to evaluate console profile (AccessDenied)"
+            except Exception:
+                console_status = "Unverified"
+
+            remediation_text = (
+                f"Enable Multi-Factor Authentication (MFA) for user {user_name}:\n"
+                f"aws iam create-virtual-mfa-device --virtual-mfa-device-name {user_name}-mfa\n"
+                f"aws iam enable-mfa-device --user-name {user_name} --serial-number <mfa-device-arn> "
+                f"--authentication-code-1 <code1> --authentication-code-2 <code2>"
+            )
+            if not has_console and console_status.startswith("Not Configured"):
+                remediation_text = (
+                    f"User {user_name} does not have console password access configured (programmatic access only). "
+                    f"If console access is granted in the future, enforce MFA before login."
+                )
+
             return Finding(
                 id=f"iam-user-no-mfa-{user_name}",
                 check_name="IAM User Without MFA Enabled",
@@ -148,19 +183,27 @@ def check_user_mfa(iam_client: Any, user_name: str) -> Optional[Finding]:
                 severity="MEDIUM",
                 exposure="INTERNAL",
                 sensitivity="MEDIUM",
-                evidence={"MFADevices": []},
-                remediation=(
-                    f"Enable Virtual MFA for user {user_name} via AWS IAM Console or CLI:\n"
-                    f"aws iam create-virtual-mfa-device --virtual-mfa-device-name {user_name}-mfa"
-                )
+                evidence={
+                    "UserName": user_name,
+                    "MFADevices": [],
+                    "ConsoleAccess": console_status,
+                },
+                cis_id="CIS-1.5",
+                remediation=remediation_text,
             )
-    except ClientError:
-        pass
+    except ClientError as e:
+        err_code = e.response.get("Error", {}).get("Code", "")
+        if err_code == "AccessDenied":
+            print(f"[WARN] Unable to evaluate MFA for user {user_name}: AccessDenied on list_mfa_devices")
     return None
 
 
 def check_user_access_keys(iam_client: Any, user_name: str) -> List[Finding]:
-    """Check for active or old access keys (>90 days)."""
+    """
+    Check for active access keys and enforce the 90-day rotation policy.
+    An active key that is 0 days old must NOT be flagged as overdue for rotation.
+    Never deactivates or rotates keys automatically.
+    """
     findings = []
     try:
         keys_resp = iam_client.list_access_keys(UserName=user_name)
@@ -170,12 +213,43 @@ def check_user_access_keys(iam_client: Any, user_name: str) -> List[Finding]:
             if key_meta.get("Status") == "Active":
                 key_id = key_meta.get("AccessKeyId", "")
                 created_date = key_meta.get("CreateDate")
-                age_days = (now - created_date).days if created_date else 0
 
-                severity = "HIGH" if age_days > 90 else "LOW"
+                # Handle date edge cases & timezone awareness
+                if created_date:
+                    if created_date.tzinfo is None:
+                        created_date = created_date.replace(tzinfo=timezone.utc)
+                    age_days = (now - created_date).days
+                    # Guard against negative age due to minor clock skew
+                    if age_days < 0:
+                        age_days = 0
+                else:
+                    age_days = 0
+
+                is_overdue = age_days > 90
+
+                if is_overdue:
+                    # Enforce 90-day rotation policy strictly
+                    check_name = "IAM User Has Active Access Key Overdue for Rotation (>90 Days)"
+                    severity = "HIGH"
+                    remediation = (
+                        f"Access key {key_id} is {age_days} days old (>90 days overdue). Rotate key:\n"
+                        f"1. Generate replacement key: aws iam create-access-key --user-name {user_name}\n"
+                        f"2. Update workloads with new credentials.\n"
+                        f"3. Deactivate old key: aws iam update-access-key --access-key-id {key_id} --status Inactive --user-name {user_name}\n"
+                        f"4. Delete old key: aws iam delete-access-key --access-key-id {key_id} --user-name {user_name}"
+                    )
+                else:
+                    # Compliant key within rotation window (0 - 90 days)
+                    check_name = "IAM User Has Active Access Key"
+                    severity = "LOW"
+                    remediation = (
+                        f"Access key {key_id} is {age_days} day(s) old and complies with the 90-day rotation policy. "
+                        f"Track key age and plan rotation prior to reaching 90 days."
+                    )
+
                 findings.append(Finding(
                     id=f"iam-active-access-key-{user_name}-{key_id}",
-                    check_name="IAM User Has Active Access Key",
+                    check_name=check_name,
                     resource_type="AWS::IAM::User",
                     resource_id=user_name,
                     region="global",
@@ -186,16 +260,17 @@ def check_user_access_keys(iam_client: Any, user_name: str) -> List[Finding]:
                         "AccessKeyId": key_id,
                         "Status": "Active",
                         "AgeDays": age_days,
-                        "CreateDate": str(created_date)
+                        "IsOverdueForRotation": is_overdue,
+                        "RotationThresholdDays": 90,
+                        "CreateDate": str(created_date) if created_date else "Unknown",
                     },
-                    remediation=(
-                        f"Rotate access key {key_id} for user {user_name}:\n"
-                        f"aws iam update-access-key --access-key-id {key_id} --status Inactive --user-name {user_name}\n"
-                        f"aws iam delete-access-key --access-key-id {key_id} --user-name {user_name}"
-                    )
+                    cis_id="CIS-1.14",
+                    remediation=remediation,
                 ))
-    except ClientError:
-        pass
+    except ClientError as e:
+        err_code = e.response.get("Error", {}).get("Code", "")
+        if err_code == "AccessDenied":
+            print(f"[WARN] Unable to evaluate access keys for user {user_name}: AccessDenied on list_access_keys")
     return findings
 
 
@@ -237,8 +312,9 @@ def check_overprivileged_roles(iam_client: Any) -> List[Finding]:
                         ))
             except ClientError:
                 pass
-    except ClientError:
-        pass
+    except ClientError as e:
+        print(f"[ERROR] IAM list_roles failed (Unable to evaluate IAM roles): {e}")
+        raise
     return findings
 
 
@@ -254,8 +330,8 @@ def scan_iam(client: Optional[Any] = None) -> List[Finding]:
         users_resp = iam_client.list_users()
         users = users_resp.get("Users", [])
     except ClientError as e:
-        print(f"[WARN] IAM list_users failed: {e}")
-        users = []
+        print(f"[ERROR] IAM list_users failed (Unable to evaluate IAM users): {e}")
+        raise
 
     for user in users:
         user_name = user.get("UserName", "")

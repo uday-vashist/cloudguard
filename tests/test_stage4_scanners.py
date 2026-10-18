@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
+from botocore.exceptions import ClientError
 
 # Ensure project root is available in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -253,3 +254,28 @@ def test_monitoring_scanner_compliant_baseline_produces_zero_findings():
 
     findings = scan_monitoring(cloudtrail_client=mock_ct, cloudwatch_client=mock_cw, region_name="ap-south-1")
     assert len(findings) == 0, "Compliant CloudTrail & CloudWatch setup must produce 0 findings!"
+
+
+def test_sg_scanner_raises_on_describe_security_groups_client_error():
+    """Verify that sg_scanner raises ClientError when describe_security_groups fails (e.g. UnauthorizedOperation)."""
+    mock_ec2 = MagicMock()
+    mock_ec2.get_paginator.side_effect = AttributeError("No paginator")
+    mock_ec2.describe_security_groups.side_effect = ClientError(
+        {"Error": {"Code": "UnauthorizedOperation", "Message": "You are not authorized"}},
+        "DescribeSecurityGroups"
+    )
+    with pytest.raises(ClientError):
+        scan_security_groups(client=mock_ec2, region_name="ap-south-1")
+
+
+def test_monitoring_scanner_raises_on_describe_trails_client_error():
+    """Verify that monitoring_scanner raises ClientError when describe_trails fails."""
+    mock_ct = MagicMock()
+    mock_ct.describe_trails.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+        "DescribeTrails"
+    )
+    mock_cw = MagicMock()
+    with pytest.raises(ClientError):
+        scan_monitoring(cloudtrail_client=mock_ct, cloudwatch_client=mock_cw, region_name="ap-south-1")
+

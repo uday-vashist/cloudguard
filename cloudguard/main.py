@@ -31,13 +31,24 @@ from cloudguard.scoring import score_and_rank_findings
 from cloudguard.report import generate_html_report
 
 
-def run_smoke_test(profile: str, region: str) -> int:
+def run_smoke_test(profile: str, region: str, demo: bool = False) -> int:
     """
     Performs STS get_caller_identity check using the read-only client wrapper.
     Ensures safe authentication to AWS without exposing credentials.
     """
     print("=" * 60)
     print(" CloudGuard CLI - Authentication & Smoke Check")
+    if demo:
+        print(" Environment: Offline Mock Testbed (Zero AWS credentials needed)")
+        print(f" Simulated Region: {region}")
+        print("=" * 60)
+        print("\n[OK] Mock AWS Authentication Successful!")
+        print("  Account ID : 123456789012 (Offline Testbed Sandbox)")
+        print("  Arn        : arn:aws:iam::123456789012:user/cloudguard-auditor")
+        print("  UserId     : AIDASAMPLEAUDITOR")
+        print("\nCloudGuard read-only session is operational and ready for audit.")
+        return 0
+
     print(f" Profile: {profile} | Region: {region}")
     print("=" * 60)
 
@@ -55,10 +66,14 @@ def run_smoke_test(profile: str, region: str) -> int:
         print("To configure your AWS profile, run:")
         print(f"    aws configure --profile {profile}")
         print("Enter your Access Key ID, Secret Access Key, and set default region to 'ap-south-1'.")
+        print("\n[TIP] To run an offline verification without an active AWS account, run:")
+        print("    python -m cloudguard.main --smoke-test --demo")
         return 1
     except NoCredentialsError:
         print(f"\n[ERROR] No AWS credentials found for profile '{profile}'.")
         print(f"Please run 'aws configure --profile {profile}'.")
+        print("\n[TIP] To run an offline verification without an active AWS account, run:")
+        print("    python -m cloudguard.main --smoke-test --demo")
         return 1
     except ClientError as e:
         print(f"\n[ERROR] AWS Error during STS call: {e}")
@@ -73,10 +88,12 @@ def run_audit(
     region: str = DEFAULT_REGION,
     output_path: str = "reports/audit_report.html",
     session: Optional[CloudGuardSession] = None,
+    mock_clients: Optional[dict] = None,
+    demo: bool = False,
 ) -> int:
     """
     Executes the end-to-end CloudGuard audit pipeline:
-    1. Authenticates via read-only CloudGuardSession.
+    1. Authenticates via read-only CloudGuardSession (or offline mock testbed in demo mode).
     2. Runs S3, IAM, Security Group, and Monitoring scanners using wrapped read-only clients.
     3. Tags findings with CIS AWS Foundations Benchmark controls.
     4. Calculates 3-factor multiplicative risk scores and ranks findings.
@@ -86,26 +103,45 @@ def run_audit(
     Returns:
         0 on success (or clean audit), 1 on error or incomplete audit.
     """
-    print("=" * 60)
-    print(" CloudGuard - AWS Security Audit Tool")
-    print(f" Profile: {profile} | Region: {region}")
-    print("=" * 60)
+    if demo and not mock_clients:
+        try:
+            from tests.validate import build_mock_clients
+            mock_clients = build_mock_clients()
+        except ImportError:
+            pass
 
-    # 1. Initialize AWS read-only session
-    try:
-        cg_session = session or get_session(profile_name=profile, region_name=region)
-    except (ProfileNotFound, RuntimeError) as e:
-        print(f"\n[ERROR] AWS profile '{profile}' was not found in your configuration.")
-        print(f"To configure your AWS profile, run:")
-        print(f"    aws configure --profile {profile}")
-        return 1
-    except NoCredentialsError:
-        print(f"\n[ERROR] No AWS credentials found for profile '{profile}'.")
-        print(f"Please run 'aws configure --profile {profile}'.")
-        return 1
-    except Exception as e:
-        print(f"\n[ERROR] Failed to initialize AWS session: {e}")
-        return 1
+    if demo or mock_clients:
+        print("=" * 60)
+        print(" CloudGuard - AWS Security Audit Tool [DEMO / SYNTHETIC TESTBED]")
+        print(f" Target Region: {region} (Simulated AWS Infrastructure)")
+        print(" Note: No live credentials or credit-card verification required")
+        print("=" * 60)
+        cg_session = None
+    else:
+        print("=" * 60)
+        print(" CloudGuard - AWS Security Audit Tool")
+        print(f" Profile: {profile} | Region: {region}")
+        print("=" * 60)
+
+        # 1. Initialize AWS read-only session
+        try:
+            cg_session = session or get_session(profile_name=profile, region_name=region)
+        except (ProfileNotFound, RuntimeError) as e:
+            print(f"\n[ERROR] AWS profile '{profile}' was not found in your configuration.")
+            print(f"To configure your AWS profile, run:")
+            print(f"    aws configure --profile {profile}")
+            print("\n[TIP] To run an offline audit demonstration without live AWS credentials, run:")
+            print("    python -m cloudguard.main --demo")
+            return 1
+        except NoCredentialsError:
+            print(f"\n[ERROR] No AWS credentials found for profile '{profile}'.")
+            print(f"Please run 'aws configure --profile {profile}'.")
+            print("\n[TIP] To run an offline audit demonstration without live AWS credentials, run:")
+            print("    python -m cloudguard.main --demo")
+            return 1
+        except Exception as e:
+            print(f"\n[ERROR] Failed to initialize AWS session: {e}")
+            return 1
 
     all_findings = []
     failed_scanners = []
@@ -114,7 +150,7 @@ def run_audit(
     # Scanner 1: S3 Storage
     print("\n[1/4] Auditing Amazon S3 storage...")
     try:
-        s3_client = cg_session.client("s3")
+        s3_client = mock_clients["s3"] if mock_clients else cg_session.client("s3")
         s3_findings = scan_s3(client=s3_client, region_name=region)
         all_findings.extend(s3_findings)
         print(f"      -> Completed. Found {len(s3_findings)} S3 issue(s)")
@@ -125,7 +161,7 @@ def run_audit(
     # Scanner 2: IAM Identity
     print("\n[2/4] Auditing AWS IAM identity and access...")
     try:
-        iam_client = cg_session.client("iam")
+        iam_client = mock_clients["iam"] if mock_clients else cg_session.client("iam")
         iam_findings = scan_iam(client=iam_client)
         all_findings.extend(iam_findings)
         print(f"      -> Completed. Found {len(iam_findings)} IAM issue(s)")
@@ -136,7 +172,7 @@ def run_audit(
     # Scanner 3: Security Groups
     print("\n[3/4] Auditing EC2 Security Groups network perimeter...")
     try:
-        ec2_client = cg_session.client("ec2")
+        ec2_client = mock_clients["ec2"] if mock_clients else cg_session.client("ec2")
         sg_findings = scan_security_groups(client=ec2_client, region_name=region)
         all_findings.extend(sg_findings)
         print(f"      -> Completed. Found {len(sg_findings)} Security Group issue(s)")
@@ -147,8 +183,8 @@ def run_audit(
     # Scanner 4: Observability & Monitoring
     print("\n[4/4] Auditing Observability (CloudTrail & CloudWatch)...")
     try:
-        ct_client = cg_session.client("cloudtrail")
-        cw_client = cg_session.client("cloudwatch")
+        ct_client = mock_clients["cloudtrail"] if mock_clients else cg_session.client("cloudtrail")
+        cw_client = mock_clients["cloudwatch"] if mock_clients else cg_session.client("cloudwatch")
         mon_findings = scan_monitoring(
             cloudtrail_client=ct_client,
             cloudwatch_client=cw_client,
@@ -184,11 +220,12 @@ def run_audit(
 
     # 6. Generate HTML report
     failed_scanner_names = [name for name, _ in failed_scanners]
+    display_profile = "cloudguard (demo testbed)" if (demo or mock_clients) else profile
     try:
         report_path = generate_html_report(
             findings=ranked_findings,
             output_path=output_path,
-            profile=profile,
+            profile=display_profile,
             region=region,
             failed_scanners=failed_scanner_names if failed_scanners else None,
         )
@@ -240,6 +277,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Run STS get_caller_identity smoke test to verify authentication."
     )
     parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run audit in offline demonstration mode using the synthetic AWS testbed (no live credentials or credit-card verification needed)."
+    )
+    parser.add_argument(
         "--output",
         default="reports/audit_report.html",
         help="Path for generated HTML audit report (default: reports/audit_report.html)"
@@ -249,9 +291,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Smoke test mode
     if args.smoke_test:
+        if args.demo:
+            return run_smoke_test(args.profile, args.region, demo=True)
         return run_smoke_test(args.profile, args.region)
 
     # Full audit pipeline mode
+    if args.demo:
+        return run_audit(
+            profile=args.profile,
+            region=args.region,
+            output_path=args.output,
+            demo=True,
+        )
     return run_audit(
         profile=args.profile,
         region=args.region,

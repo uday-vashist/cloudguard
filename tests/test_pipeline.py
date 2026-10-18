@@ -195,3 +195,23 @@ def test_main_cli_audit_dispatch():
             region="ap-south-1",
             output_path="custom/report.html",
         )
+
+
+def test_main_cli_demo_dispatch(tmp_path: Path):
+    """Verify CLI --demo invokes run_audit in demo mode without AWS credentials."""
+    out_file = tmp_path / "demo_report.html"
+    exit_code = main(["--demo", "--output", str(out_file)])
+    assert exit_code == 0
+    assert out_file.exists()
+    content = out_file.read_text(encoding="utf-8")
+    assert "cloudguard (demo testbed)" in content
+    assert "CRITICAL" in content
+
+
+def test_main_cli_demo_smoke_test_dispatch():
+    """Verify CLI --smoke-test --demo executes offline mock authentication."""
+    with patch("cloudguard.main.run_smoke_test", return_value=0) as p_smoke:
+        exit_code = main(["--smoke-test", "--demo"])
+        assert exit_code == 0
+        p_smoke.assert_called_once_with("cloudguard", "ap-south-1", demo=True)
+

@@ -176,17 +176,18 @@ def scan_security_groups(client: Optional[Any] = None, region_name: str = "ap-so
     findings: List[Finding] = []
 
     try:
-        paginator = ec2_client.get_paginator("describe_security_groups")
-        for page in paginator.paginate():
-            for sg in page.get("SecurityGroups", []):
-                findings.extend(check_security_group_ingress(sg, region_name))
-    except (ClientError, AttributeError):
-        # Fallback if paginator not supported by mock or custom client
         try:
+            paginator = ec2_client.get_paginator("describe_security_groups")
+            for page in paginator.paginate():
+                for sg in page.get("SecurityGroups", []):
+                    findings.extend(check_security_group_ingress(sg, region_name))
+        except (AttributeError, KeyError):
+            # Fallback if paginator not supported by mock or custom client
             resp = ec2_client.describe_security_groups()
             for sg in resp.get("SecurityGroups", []):
                 findings.extend(check_security_group_ingress(sg, region_name))
-        except ClientError as e:
-            print(f"[WARN] EC2 describe_security_groups failed: {e}")
+    except ClientError as e:
+        print(f"[ERROR] EC2 describe_security_groups failed (Unable to evaluate Security Groups): {e}")
+        raise
 
     return findings

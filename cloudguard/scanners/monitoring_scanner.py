@@ -27,15 +27,21 @@ SECURITY_ALARM_KEYWORDS = [
 def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding]:
     """
     Audits CloudTrail for multi-region logging and cryptographic log file validation.
+    Handles account/region scope, shadow trails, and distinguishes empty regional
+    listings from an absolute absence of account logging.
     """
     findings: List[Finding] = []
 
     try:
-        resp = cloudtrail_client.describe_trails()
+        # includeShadowTrails=True ensures multi-region trails homed in other regions are included
+        try:
+            resp = cloudtrail_client.describe_trails(includeShadowTrails=True)
+        except TypeError:
+            resp = cloudtrail_client.describe_trails()
         trails = resp.get("trailList", [])
     except ClientError as e:
-        print(f"[WARN] CloudTrail describe_trails failed: {e}")
-        return findings
+        print(f"[ERROR] CloudTrail describe_trails failed (Unable to evaluate CloudTrail): {e}")
+        raise
 
     # Case A: No trails configured in the account
     if not trails:
@@ -48,7 +54,11 @@ def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding
             severity="CRITICAL",
             exposure="INTERNAL",
             sensitivity="CRITICAL",
-            evidence={"trailList": []},
+            evidence={
+                "trailList": [],
+                "AuditedRegion": region,
+                "ShadowTrailsQueried": True,
+            },
             cis_id="CIS-3.1",
             remediation=(
                 "Create a multi-region CloudTrail trail:\n"
@@ -65,6 +75,7 @@ def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding
         trail_arn = trail.get("TrailARN", trail_name)
         is_multi_region = trail.get("IsMultiRegionTrail", False)
         log_validation = trail.get("LogFileValidationEnabled", False)
+        home_region = trail.get("HomeRegion", region)
 
         # 1. Multi-region check
         if not is_multi_region:
@@ -80,7 +91,9 @@ def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding
                 evidence={
                     "TrailName": trail_name,
                     "TrailARN": trail_arn,
-                    "IsMultiRegionTrail": False
+                    "HomeRegion": home_region,
+                    "IsMultiRegionTrail": False,
+                    "Scope": f"Single region only (Homed in {home_region})"
                 },
                 cis_id="CIS-3.1",
                 remediation=(
@@ -118,24 +131,32 @@ def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding
 def check_cloudwatch_alarms(cloudwatch_client: Any, region: str) -> List[Finding]:
     """
     Audits CloudWatch for essential security alarms (Root account usage, unauthorized API calls).
+    Handles pagination, regional scope, and provides accurate config verification notes.
     """
     findings: List[Finding] = []
 
     try:
-        resp = cloudwatch_client.describe_alarms()
-        alarms = resp.get("MetricAlarms", [])
+        alarms = []
+        try:
+            paginator = cloudwatch_client.get_paginator("describe_alarms")
+            for page in paginator.paginate():
+                alarms.extend(page.get("MetricAlarms", []))
+        except (AttributeError, KeyError):
+            resp = cloudwatch_client.describe_alarms()
+            alarms = resp.get("MetricAlarms", [])
     except ClientError as e:
-        print(f"[WARN] CloudWatch describe_alarms failed: {e}")
-        return findings
+        print(f"[ERROR] CloudWatch describe_alarms failed (Unable to evaluate CloudWatch): {e}")
+        raise
 
     # Check if any security alarms exist
-    has_security_alarm = False
+    matched_alarms = []
     for a in alarms:
         alarm_name = a.get("AlarmName", "").lower()
         metric_name = a.get("MetricName", "").lower()
         if any(kw in alarm_name or kw in metric_name for kw in SECURITY_ALARM_KEYWORDS):
-            has_security_alarm = True
-            break
+            matched_alarms.append(a.get("AlarmName", "UnnamedAlarm"))
+
+    has_security_alarm = len(matched_alarms) > 0
 
     if not has_security_alarm or len(alarms) == 0:
         findings.append(Finding(
@@ -149,7 +170,9 @@ def check_cloudwatch_alarms(cloudwatch_client: Any, region: str) -> List[Finding
             sensitivity="HIGH",
             evidence={
                 "TotalMetricAlarms": len(alarms),
-                "HasSecurityAlarm": has_security_alarm
+                "HasSecurityAlarm": has_security_alarm,
+                "MatchedSecurityAlarms": matched_alarms,
+                "ConfigVerificationNote": "Alarms matched heuristically on name/metric keywords. Deep metric filter pattern and alarm action configuration unverified."
             },
             cis_id="CIS-3.4",
             remediation=(
