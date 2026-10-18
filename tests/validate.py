@@ -1,7 +1,7 @@
 """
 CloudGuard Stage 7: Offline Detection Accuracy & Ground Truth Validation Tool.
 
-Validates the detection accuracy of CloudGuard scanners against the 14 ground-truth
+Validates the detection accuracy of CloudGuard scanners against confirmed ground-truth
 security misconfigurations defined in tests/expected_findings.json without requiring
 AWS credentials, active internet, or deployed cloud infrastructure.
 
@@ -76,7 +76,7 @@ def load_expected_findings(json_path: Optional[Path] = None) -> List[Dict[str, A
 def build_mock_clients() -> Dict[str, MagicMock]:
     """
     Constructs a fully synthetic, mocked AWS environment mirroring both the
-    14 planted misconfigurations in tests/expected_findings.json and compliant
+    confirmed misconfigurations in tests/expected_findings.json and compliant
     baseline resources to test false positive resistance.
     """
     # -------------------------------------------------------------------------
@@ -187,6 +187,15 @@ def build_mock_clients() -> Dict[str, MagicMock]:
             return {"MFADevices": [{"SerialNumber": f"arn:aws:iam::123456789012:mfa/{UserName}"}]}
         return {"MFADevices": []}
     mock_iam.list_mfa_devices.side_effect = iam_mfa
+
+    def iam_login_profile(UserName: str) -> Dict[str, Any]:
+        if UserName == "cloudguard-test-no-mfa-user":
+            return {"LoginProfile": {"CreateDate": datetime.now(timezone.utc)}}
+        raise ClientError(
+            {"Error": {"Code": "NoSuchEntity", "Message": "No login profile"}},
+            "GetLoginProfile",
+        )
+    mock_iam.get_login_profile.side_effect = iam_login_profile
 
     def iam_access_keys(UserName: str) -> Dict[str, Any]:
         if UserName == "cloudguard-test-no-mfa-user":
@@ -603,8 +612,9 @@ def run_offline_validation(
     # Tag findings with official CIS control IDs
     tagged_findings = tag_findings_with_cis(all_findings)
 
-    # Evaluate validation metrics
-    report = evaluate_validation(expected_findings, tagged_findings)
+    # INFO findings describe unverified state and are not misconfiguration detections.
+    confirmed_findings = [finding for finding in tagged_findings if finding.severity != "INFO"]
+    report = evaluate_validation(expected_findings, confirmed_findings)
     summary_text = format_validation_summary(report, expected_path)
 
     return report, summary_text

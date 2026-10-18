@@ -12,9 +12,10 @@ Mathematical Formula:
 Factor Weights Justification:
 1. Severity Weight (Inherent Technical Impact of the flaw):
    - CRITICAL (10.0): Complete compromise (wildcard *:* admin privilege, public DB/SSH, public S3 policy)
-   - HIGH (7.0): Significant vulnerability (disabled S3 BPA, unencrypted bucket, single-region CloudTrail)
+    - HIGH (7.0): Significant vulnerability (disabled S3 BPA, single-region CloudTrail without a multi-region alternative)
    - MEDIUM (4.0): Security hygiene gap (missing user MFA, log validation off, missing security alarms)
-   - LOW (1.0): Informational / maintenance (active access key requiring rotation tracking)
+    - LOW (1.0): Low-severity confirmed security issue
+    - INFO (0.0): Unverified status or observation; excluded from risk totals
 
 2. Exposure Multiplier (Network Reachability / Attack Surface):
    - PUBLIC (2.0): Directly exposed to the entire internet (0.0.0.0/0, ::/0, or open internet bucket policy).
@@ -43,6 +44,7 @@ from cloudguard.models import Finding
 
 # Severity weights (base technical flaw severity)
 SEVERITY_WEIGHTS = {
+    "INFO": 0.0,
     "CRITICAL": 10.0,
     "HIGH": 7.0,
     "MEDIUM": 4.0,
@@ -70,9 +72,19 @@ def calculate_risk_score(severity: str, exposure: str, sensitivity: str) -> floa
     Formula: Severity × Exposure × Sensitivity
     Returns float rounded to 1 decimal place.
     """
-    sev_weight = SEVERITY_WEIGHTS.get(severity.upper(), 1.0)
-    exp_mult = EXPOSURE_MULTIPLIERS.get(exposure.upper(), 1.0)
-    sens_mult = SENSITIVITY_MULTIPLIERS.get(sensitivity.upper(), 1.0)
+    severity_key = severity.upper()
+    exposure_key = exposure.upper()
+    sensitivity_key = sensitivity.upper()
+    if severity_key not in SEVERITY_WEIGHTS:
+        raise ValueError(f"Unsupported finding severity: {severity}")
+    if exposure_key not in EXPOSURE_MULTIPLIERS:
+        raise ValueError(f"Unsupported exposure level: {exposure}")
+    if sensitivity_key not in SENSITIVITY_MULTIPLIERS:
+        raise ValueError(f"Unsupported sensitivity level: {sensitivity}")
+
+    sev_weight = SEVERITY_WEIGHTS[severity_key]
+    exp_mult = EXPOSURE_MULTIPLIERS[exposure_key]
+    sens_mult = SENSITIVITY_MULTIPLIERS[sensitivity_key]
 
     raw_score = sev_weight * exp_mult * sens_mult
     return round(raw_score, 1)
@@ -97,3 +109,8 @@ def score_and_rank_findings(findings: List[Finding]) -> List[Finding]:
         reverse=True
     )
     return ranked
+
+
+def aggregate_risk_score(findings: List[Finding]) -> float:
+    """Return the sum of individual scores; INFO observations contribute zero."""
+    return round(sum(finding.risk_score for finding in findings), 1)

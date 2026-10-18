@@ -44,11 +44,6 @@ CIS_CONTROLS_METADATA: Dict[str, Dict[str, str]] = {
         "section": "2. Storage",
         "description": "Centralized Block Public Access overrides insecure bucket policies and legacy ACLs."
     },
-    "CIS-2.1.3": {
-        "title": "Ensure default encryption is enabled on S3 buckets",
-        "section": "2. Storage",
-        "description": "Mandatory Server-Side Encryption (SSE) ensures all data at rest is encrypted."
-    },
     "CIS-3.1": {
         "title": "Ensure CloudTrail is enabled across all regions",
         "section": "3. Logging & Monitoring",
@@ -86,16 +81,14 @@ CHECK_TO_CIS_MAP = {
     "S3 Bucket Public Access via Policy": "CIS-2.1.1",
     "S3 Bucket Block Public Access Disabled": "CIS-2.1.2",
     "S3 Bucket Public Access via ACL": "CIS-2.1.2",
-    "S3 Bucket Missing Default Encryption": "CIS-2.1.3",
     "IAM Policy Grants Wildcard Administrative Privileges (*:*)": "CIS-1.16",
     "IAM User Without MFA Enabled": "CIS-1.5",
-    "IAM User Has Active Access Key": "CIS-1.14",
     "IAM User Has Active Access Key Overdue for Rotation (>90 Days)": "CIS-1.14",
     "IAM Role Has Full Administrative Access": "CIS-1.16",
     "CloudTrail Not Enabled In All Regions": "CIS-3.1",
     "No CloudTrail Trails Configured in AWS Account": "CIS-3.1",
     "CloudTrail Log File Validation Disabled": "CIS-3.2",
-    "Missing CloudWatch Metric Alarms for Critical Security Events": "CIS-3.4",
+    "Missing CloudWatch Metric Alarms for Critical Security Events in Audited Region": "CIS-3.4",
 }
 
 
@@ -106,7 +99,7 @@ def get_cis_id_for_check(check_name: str) -> str:
         return CHECK_TO_CIS_MAP[check_name]
 
     # 2. Key rotation partial match
-    if "Active Access Key" in check_name:
+    if "Active Access Key Overdue for Rotation" in check_name:
         return "CIS-1.14"
 
     # 3. Security Group Port matching

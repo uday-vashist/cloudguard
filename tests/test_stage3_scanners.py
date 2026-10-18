@@ -101,8 +101,8 @@ def test_s3_scanner_detects_bpa_disabled_and_public_acl():
     assert "S3 Bucket Public Access via ACL" in check_names
 
 
-def test_s3_scanner_detects_missing_encryption():
-    """Verify detection of bucket missing default encryption."""
+def test_s3_scanner_marks_missing_explicit_encryption_as_unverified():
+    """Missing explicit defaults do not prove existing objects are unencrypted."""
     mock_s3 = MagicMock()
     mock_s3.list_buckets.return_value = {
         "Buckets": [{"Name": "cloudguard-test-no-encrypt"}]
@@ -130,8 +130,9 @@ def test_s3_scanner_detects_missing_encryption():
 
     findings = scan_s3(client=mock_s3, region_name="ap-south-1")
     assert len(findings) == 1
-    assert findings[0].check_name == "S3 Bucket Missing Default Encryption"
-    assert findings[0].severity == "HIGH"
+    assert findings[0].check_name == "S3 Explicit Default Encryption Configuration Unverified"
+    assert findings[0].severity == "INFO"
+    assert findings[0].cis_id == "N/A"
 
 
 def test_s3_scanner_compliant_baseline_produces_zero_findings():
@@ -195,8 +196,8 @@ def test_iam_scanner_detects_wildcard_policy():
     assert f.resource_id == "cloudguard-test-wildcard-admin-user"
 
 
-def test_iam_scanner_detects_missing_mfa_and_active_key():
-    """Verify detection of user without MFA and with active access key."""
+def test_iam_scanner_detects_missing_mfa_but_not_compliant_active_key():
+    """A key within the 90-day window is not a rotation finding."""
     mock_iam = MagicMock()
     mock_iam.list_users.return_value = {
         "Users": [{"UserName": "cloudguard-test-no-mfa-user"}]
@@ -204,6 +205,7 @@ def test_iam_scanner_detects_missing_mfa_and_active_key():
     mock_iam.list_user_policies.return_value = {"PolicyNames": []}
     mock_iam.list_attached_user_policies.return_value = {"AttachedPolicies": []}
     mock_iam.list_mfa_devices.return_value = {"MFADevices": []}  # No MFA!
+    mock_iam.get_login_profile.return_value = {"LoginProfile": {"CreateDate": datetime.now(timezone.utc)}}
     mock_iam.list_access_keys.return_value = {
         "AccessKeyMetadata": [
             {
@@ -218,7 +220,52 @@ def test_iam_scanner_detects_missing_mfa_and_active_key():
     findings = scan_iam(client=mock_iam)
     check_names = [f.check_name for f in findings]
     assert "IAM User Without MFA Enabled" in check_names
-    assert "IAM User Has Active Access Key" in check_names
+    assert not any("Active Access Key" in name for name in check_names)
+
+
+@pytest.mark.parametrize(
+    "elapsed, overdue",
+    [
+        (timedelta(0), False),
+        (timedelta(days=90), False),
+        (timedelta(days=90, seconds=1), True),
+        (timedelta(days=91), True),
+        (-timedelta(days=1), False),
+    ],
+)
+def test_access_key_rotation_boundary(elapsed, overdue):
+    """The exact 90-day limit is compliant; any older active key is overdue."""
+    from cloudguard.scanners.iam_scanner import check_user_access_keys
+
+    mock_iam = MagicMock()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mock_iam.list_access_keys.return_value = {
+        "AccessKeyMetadata": [{
+            "AccessKeyId": "AKIAEXAMPLE12345678",
+            "Status": "Active",
+            "CreateDate": now - elapsed,
+        }]
+    }
+
+    findings = check_user_access_keys(mock_iam, "alice", now=now)
+    assert bool(findings) is overdue
+    mock_iam.update_access_key.assert_not_called()
+    mock_iam.create_access_key.assert_not_called()
+    mock_iam.delete_access_key.assert_not_called()
+    if overdue:
+        assert findings[0].evidence["AgeDays"] > 90
+        assert findings[0].evidence["IsOverdueForRotation"] is True
+
+
+def test_access_key_without_creation_date_is_not_assumed_compliant():
+    from cloudguard.scanners.iam_scanner import check_user_access_keys
+
+    mock_iam = MagicMock()
+    mock_iam.list_access_keys.return_value = {"AccessKeyMetadata": [{
+        "AccessKeyId": "AKIAEXAMPLE12345678", "Status": "Active",
+    }]}
+    with pytest.raises(RuntimeError, match="CreateDate is missing or invalid"):
+        check_user_access_keys(mock_iam, "alice")
 
 
 def test_iam_scanner_detects_overprivileged_role():

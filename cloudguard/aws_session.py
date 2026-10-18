@@ -61,29 +61,36 @@ class ReadOnlyClientWrapper:
 
     def __init__(self, raw_client: Any, service_name: str):
         # Use object.__setattr__ to avoid recursive __getattr__ calls
-        object.__setattr__(self, "_raw_client", raw_client)
+        object.__setattr__(self, "_ReadOnlyClientWrapper__raw_client", raw_client)
         object.__setattr__(self, "_service_name", service_name)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in {"_raw_client", "_ReadOnlyClientWrapper__raw_client", "__dict__"}:
+            raise AttributeError("The underlying AWS client is private to the read-only wrapper.")
+        return object.__getattribute__(self, name)
 
     def _validate_operation(self, operation_name: str) -> None:
         """Validate whether an operation is strictly read-only."""
         op_lower = operation_name.lower()
 
-        # 1. Check for explicitly blocked mutating actions
+        # AWS read APIs may contain mutation words, e.g. list_attached_user_policies.
+        # Classify by the operation's read-only verb before inspecting its name.
+        if any(op_lower.startswith(prefix) for prefix in ALLOWED_METHOD_PREFIXES):
+            return
+
+        # 2. Name common mutations in the rejection message; all other operations
+        # remain denied below, so this list is descriptive rather than an allowlist.
         for keyword in MUTATING_KEYWORDS:
-            if op_lower.startswith(keyword) or f"_{keyword}" in op_lower:
+            if op_lower.startswith(keyword):
                 raise ReadOnlyViolationError(
                     f"[CloudGuard Read-Only Guard] Blocked mutating operation '{operation_name}' on AWS {self._service_name} client. "
                     f"CloudGuard strictly prohibits write/mutation actions ('{keyword}')."
                 )
 
-        # 2. Check if operation starts with allowed read-only prefixes
-        is_read_only = any(op_lower.startswith(prefix) for prefix in ALLOWED_METHOD_PREFIXES)
-
-        if not is_read_only:
-            raise ReadOnlyViolationError(
-                f"[CloudGuard Read-Only Guard] Blocked call to '{operation_name}' on AWS {self._service_name} client. "
-                f"CloudGuard is strictly read-only and only permits get_*, list_*, and describe_* operations."
-            )
+        raise ReadOnlyViolationError(
+            f"[CloudGuard Read-Only Guard] Blocked call to '{operation_name}' on AWS {self._service_name} client. "
+            f"CloudGuard is strictly read-only and only permits get_*, list_*, and describe_* operations."
+        )
 
     def _wrap_paginator(self, original_get_paginator: Callable) -> Callable:
         """Ensure paginators only execute read-only operations."""
@@ -117,7 +124,10 @@ class ReadOnlyClientWrapper:
     def __getattr__(self, name: str) -> Any:
         # Allow internal python attributes and whitelisted client utilities
         if name.startswith("_") or name in ALLOWED_CLIENT_UTILITIES:
-            attr = getattr(self._raw_client, name)
+            if name.startswith("_"):
+                raise AttributeError(f"'{type(self).__name__}' has no exposed attribute '{name}'.")
+            raw_client = object.__getattribute__(self, "_ReadOnlyClientWrapper__raw_client")
+            attr = getattr(raw_client, name)
             if name == "get_paginator":
                 return self._wrap_paginator(attr)
             if name == "get_waiter":
@@ -128,7 +138,8 @@ class ReadOnlyClientWrapper:
         self._validate_operation(name)
 
         # Retrieve and return the raw client attribute
-        return getattr(self._raw_client, name)
+        raw_client = object.__getattribute__(self, "_ReadOnlyClientWrapper__raw_client")
+        return getattr(raw_client, name)
 
     def __repr__(self) -> str:
         return f"<ReadOnlyClientWrapper service='{self._service_name}'>"

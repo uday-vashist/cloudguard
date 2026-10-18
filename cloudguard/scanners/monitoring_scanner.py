@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from botocore.exceptions import ClientError
 from cloudguard.aws_session import get_client
 from cloudguard.models import Finding
+from cloudguard.scanners._utils import collect_pages
 
 # Common keywords in alarm names/metrics indicating security event monitoring
 SECURITY_ALARM_KEYWORDS = [
@@ -33,41 +34,37 @@ def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding
     findings: List[Finding] = []
 
     try:
-        # includeShadowTrails=True ensures multi-region trails homed in other regions are included
-        try:
-            resp = cloudtrail_client.describe_trails(includeShadowTrails=True)
-        except TypeError:
-            resp = cloudtrail_client.describe_trails()
-        trails = resp.get("trailList", [])
-    except ClientError as e:
-        print(f"[ERROR] CloudTrail describe_trails failed (Unable to evaluate CloudTrail): {e}")
+        trails = collect_pages(
+            cloudtrail_client, "describe_trails", "trailList",
+            {"includeShadowTrails": True},
+        )
+    except ClientError:
         raise
 
-    # Case A: No trails configured in the account
+    # A regional listing cannot prove account-wide absence of single-region trails.
     if not trails:
         findings.append(Finding(
-            id="cloudtrail-no-trails-configured",
-            check_name="No CloudTrail Trails Configured in AWS Account",
+            id=f"cloudtrail-no-trails-visible-{region}",
+            check_name="CloudTrail Account Coverage Unverified: No Trails Visible in Audited Region",
             resource_type="AWS::CloudTrail::Trail",
-            resource_id="None",
+            resource_id="regional-listing",
             region=region,
-            severity="CRITICAL",
+            severity="INFO",
             exposure="INTERNAL",
-            sensitivity="CRITICAL",
+            sensitivity="LOW",
             evidence={
                 "trailList": [],
                 "AuditedRegion": region,
                 "ShadowTrailsQueried": True,
+                "Status": "Regional listing was empty; this does not establish account-wide absence of trails.",
             },
-            cis_id="CIS-3.1",
-            remediation=(
-                "Create a multi-region CloudTrail trail:\n"
-                "aws cloudtrail create-trail --name account-audit-trail "
-                "--s3-bucket-name <audit-bucket-name> --is-multi-region-trail\n"
-                "aws cloudtrail start-logging --name account-audit-trail"
-            )
+            remediation="Verify CloudTrail coverage from the account's designated audit region or organization trail inventory.",
         ))
         return findings
+
+    account_has_multi_region_trail = any(
+        trail.get("IsMultiRegionTrail", False) for trail in trails
+    )
 
     # Case B: Audit each existing trail
     for trail in trails:
@@ -78,7 +75,7 @@ def check_cloudtrail_trails(cloudtrail_client: Any, region: str) -> List[Finding
         home_region = trail.get("HomeRegion", region)
 
         # 1. Multi-region check
-        if not is_multi_region:
+        if not is_multi_region and not account_has_multi_region_trail:
             findings.append(Finding(
                 id=f"cloudtrail-single-region-{trail_name}",
                 check_name="CloudTrail Not Enabled In All Regions",
@@ -136,16 +133,8 @@ def check_cloudwatch_alarms(cloudwatch_client: Any, region: str) -> List[Finding
     findings: List[Finding] = []
 
     try:
-        alarms = []
-        try:
-            paginator = cloudwatch_client.get_paginator("describe_alarms")
-            for page in paginator.paginate():
-                alarms.extend(page.get("MetricAlarms", []))
-        except (AttributeError, KeyError):
-            resp = cloudwatch_client.describe_alarms()
-            alarms = resp.get("MetricAlarms", [])
-    except ClientError as e:
-        print(f"[ERROR] CloudWatch describe_alarms failed (Unable to evaluate CloudWatch): {e}")
+        alarms = collect_pages(cloudwatch_client, "describe_alarms", "MetricAlarms")
+    except ClientError:
         raise
 
     # Check if any security alarms exist
@@ -156,23 +145,20 @@ def check_cloudwatch_alarms(cloudwatch_client: Any, region: str) -> List[Finding
         if any(kw in alarm_name or kw in metric_name for kw in SECURITY_ALARM_KEYWORDS):
             matched_alarms.append(a.get("AlarmName", "UnnamedAlarm"))
 
-    has_security_alarm = len(matched_alarms) > 0
-
-    if not has_security_alarm or len(alarms) == 0:
+    if not alarms:
         findings.append(Finding(
-            id="cloudwatch-missing-alarms",
-            check_name="Missing CloudWatch Metric Alarms for Critical Security Events",
+            id=f"cloudwatch-no-alarms-{region}",
+            check_name="Missing CloudWatch Metric Alarms for Critical Security Events in Audited Region",
             resource_type="AWS::CloudWatch::Alarm",
-            resource_id="global",
+            resource_id=region,
             region=region,
             severity="MEDIUM",
             exposure="INTERNAL",
             sensitivity="HIGH",
             evidence={
+                "AuditedRegion": region,
                 "TotalMetricAlarms": len(alarms),
-                "HasSecurityAlarm": has_security_alarm,
                 "MatchedSecurityAlarms": matched_alarms,
-                "ConfigVerificationNote": "Alarms matched heuristically on name/metric keywords. Deep metric filter pattern and alarm action configuration unverified."
             },
             cis_id="CIS-3.4",
             remediation=(
@@ -181,6 +167,30 @@ def check_cloudwatch_alarms(cloudwatch_client: Any, region: str) -> List[Finding
                 "2. Unauthorized API calls (errorCode = '*UnauthorizedOperation' or 'AccessDenied')\n"
                 "3. Console sign-in without MFA"
             )
+        ))
+    else:
+        has_security_alarm = len(matched_alarms) > 0
+        observation_title = (
+            "CloudWatch Security Alarm Candidates Found; Configuration Unverified"
+            if has_security_alarm
+            else "CloudWatch Alarm Inventory Has No Recognized Security Candidates; Status Unverified"
+        )
+        findings.append(Finding(
+            id=f"cloudwatch-alarm-config-unverified-{region}",
+            check_name=observation_title,
+            resource_type="AWS::CloudWatch::Alarm",
+            resource_id=region,
+            region=region,
+            severity="INFO",
+            exposure="INTERNAL",
+            sensitivity="LOW",
+            evidence={
+                "AuditedRegion": region,
+                "TotalMetricAlarms": len(alarms),
+                "MatchedAlarmNames": matched_alarms,
+                "Verification": "Alarm names/metrics matched keywords; filters, dimensions, thresholds, state, and actions were not validated.",
+            },
+            remediation="Review each candidate alarm's metric filter, dimensions, threshold, enabled actions, and notification destination.",
         ))
 
     return findings

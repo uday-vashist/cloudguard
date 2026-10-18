@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional
 from botocore.exceptions import ClientError
 from cloudguard.aws_session import get_client
 from cloudguard.models import Finding
+from cloudguard.scanners._utils import collect_pages
+from ipaddress import ip_network
 
 # Dictionary of sensitive ports with metadata: (service_name, severity, sensitivity, cis_id)
 SENSITIVE_PORTS: Dict[int, Dict[str, str]] = {
@@ -89,7 +91,10 @@ SENSITIVE_PORTS: Dict[int, Dict[str, str]] = {
 
 def _is_public_cidr(cidr: str) -> bool:
     """Check if CIDR block represents open public internet."""
-    return cidr in ("0.0.0.0/0", "::/0")
+    try:
+        return ip_network(cidr, strict=False).prefixlen == 0
+    except ValueError:
+        return False
 
 
 def check_security_group_ingress(sg: Dict[str, Any], region: str) -> List[Finding]:
@@ -127,13 +132,13 @@ def check_security_group_ingress(sg: Dict[str, Any], region: str) -> List[Findin
             if ip_protocol == "-1":
                 # All traffic allowed (0 - 65535)
                 port_exposed = True
-            elif ip_protocol in ("tcp", "6"):
+            elif str(ip_protocol).lower() in ("tcp", "6"):
                 if from_port is not None and to_port is not None:
                     if from_port <= port <= to_port:
                         port_exposed = True
 
             if port_exposed:
-                check_title = f"Security Group Ingress Allows Port {port} ({meta['service']}) from 0.0.0.0/0"
+                check_title = f"Security Group Ingress Allows Port {port} ({meta['service']}) from Public Internet"
                 finding_id = f"sg-open-{port}-{sg_id}"
 
                 findings.append(Finding(
@@ -158,9 +163,8 @@ def check_security_group_ingress(sg: Dict[str, Any], region: str) -> List[Findin
                     cis_id=meta["cis_id"],
                     remediation=(
                         f"Revoke ingress rule for port {port} on Security Group {sg_id}:\n"
-                        f"aws ec2 revoke-security-group-ingress --group-id {sg_id} "
-                        f"--protocol tcp --port {port} --cidr 0.0.0.0/0\n"
-                        f"Restrict access to known corporate IP addresses or use AWS SSM Session Manager."
+                        f"Review and restrict the ingress permission for port {port} on Security Group {sg_id}.\n"
+                        f"Limit access to approved source ranges or use AWS Systems Manager Session Manager."
                     )
                 ))
 
@@ -176,18 +180,10 @@ def scan_security_groups(client: Optional[Any] = None, region_name: str = "ap-so
     findings: List[Finding] = []
 
     try:
-        try:
-            paginator = ec2_client.get_paginator("describe_security_groups")
-            for page in paginator.paginate():
-                for sg in page.get("SecurityGroups", []):
-                    findings.extend(check_security_group_ingress(sg, region_name))
-        except (AttributeError, KeyError):
-            # Fallback if paginator not supported by mock or custom client
-            resp = ec2_client.describe_security_groups()
-            for sg in resp.get("SecurityGroups", []):
-                findings.extend(check_security_group_ingress(sg, region_name))
-    except ClientError as e:
-        print(f"[ERROR] EC2 describe_security_groups failed (Unable to evaluate Security Groups): {e}")
+        groups = collect_pages(ec2_client, "describe_security_groups", "SecurityGroups")
+        for sg in groups:
+            findings.extend(check_security_group_ingress(sg, region_name))
+    except ClientError:
         raise
 
     return findings

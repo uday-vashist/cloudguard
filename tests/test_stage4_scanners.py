@@ -213,11 +213,11 @@ def test_monitoring_scanner_detects_single_region_and_disabled_validation():
 
     assert "CloudTrail Not Enabled In All Regions" in check_names
     assert "CloudTrail Log File Validation Disabled" in check_names
-    assert "Missing CloudWatch Metric Alarms for Critical Security Events" in check_names
+    assert "Missing CloudWatch Metric Alarms for Critical Security Events in Audited Region" in check_names
 
 
-def test_monitoring_scanner_detects_no_trails_configured():
-    """Verify critical finding if zero CloudTrail trails exist."""
+def test_monitoring_scanner_does_not_infer_account_absence_from_empty_region():
+    """An empty regional listing is unverified, not proof of no account trails."""
     mock_ct = MagicMock()
     mock_ct.describe_trails.return_value = {"trailList": []}
 
@@ -226,11 +226,14 @@ def test_monitoring_scanner_detects_no_trails_configured():
 
     findings = scan_monitoring(cloudtrail_client=mock_ct, cloudwatch_client=mock_cw, region_name="ap-south-1")
     check_names = [f.check_name for f in findings]
-    assert "No CloudTrail Trails Configured in AWS Account" in check_names
+    assert "CloudTrail Account Coverage Unverified: No Trails Visible in Audited Region" in check_names
+    trail_observation = next(f for f in findings if f.check_name.startswith("CloudTrail Account Coverage"))
+    assert trail_observation.severity == "INFO"
+    assert trail_observation.risk_score == 0.0
 
 
-def test_monitoring_scanner_compliant_baseline_produces_zero_findings():
-    """Verify that multi-region trail with validation and security alarm produces 0 findings."""
+def test_monitoring_scanner_marks_alarm_candidate_configuration_unverified():
+    """A keyword-matched alarm is not treated as verified configuration."""
     mock_ct = MagicMock()
     mock_ct.describe_trails.return_value = {
         "trailList": [
@@ -253,7 +256,9 @@ def test_monitoring_scanner_compliant_baseline_produces_zero_findings():
     }
 
     findings = scan_monitoring(cloudtrail_client=mock_ct, cloudwatch_client=mock_cw, region_name="ap-south-1")
-    assert len(findings) == 0, "Compliant CloudTrail & CloudWatch setup must produce 0 findings!"
+    assert len(findings) == 1
+    assert findings[0].severity == "INFO"
+    assert "Configuration Unverified" in findings[0].check_name
 
 
 def test_sg_scanner_raises_on_describe_security_groups_client_error():

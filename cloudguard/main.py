@@ -27,7 +27,7 @@ from cloudguard.scanners.iam_scanner import scan_iam
 from cloudguard.scanners.sg_scanner import scan_security_groups
 from cloudguard.scanners.monitoring_scanner import scan_monitoring
 from cloudguard.cis_mapping import tag_findings_with_cis
-from cloudguard.scoring import score_and_rank_findings
+from cloudguard.scoring import aggregate_risk_score, score_and_rank_findings
 from cloudguard.report import generate_html_report
 
 
@@ -242,10 +242,13 @@ def run_audit(
     high_count = sum(1 for f in ranked_findings if f.severity == "HIGH")
     med_count = sum(1 for f in ranked_findings if f.severity == "MEDIUM")
     low_count = sum(1 for f in ranked_findings if f.severity == "LOW")
+    info_count = sum(1 for f in ranked_findings if f.severity == "INFO")
     print(f"   - CRITICAL   : {crit_count}")
     print(f"   - HIGH       : {high_count}")
     print(f"   - MEDIUM     : {med_count}")
     print(f"   - LOW        : {low_count}")
+    print(f"   - INFO       : {info_count} (not scored as risk)")
+    print(f" Aggregate Risk : {aggregate_risk_score(ranked_findings):.1f}")
     if ranked_findings:
         print(f" Peak Risk Score: {ranked_findings[0].risk_score:.1f} / 50.0")
     else:

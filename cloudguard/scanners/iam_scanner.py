@@ -17,12 +17,14 @@ VIVA CONCEPTS:
   get_policy, and get_policy_version.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from math import ceil
 import json
 from typing import Any, Dict, List, Optional
 from botocore.exceptions import ClientError
 from cloudguard.aws_session import get_client
 from cloudguard.models import Finding
+from cloudguard.scanners._utils import collect_pages
 
 ADMIN_POLICY_ARN = "arn:aws:iam::aws:policy/AdministratorAccess"
 
@@ -51,8 +53,11 @@ def check_user_wildcard_policies(iam_client: Any, user_name: str) -> List[Findin
 
     # 1. Check inline policies
     try:
-        inline_resp = iam_client.list_user_policies(UserName=user_name)
-        for policy_name in inline_resp.get("PolicyNames", []):
+        policy_names = collect_pages(
+            iam_client, "list_user_policies", "PolicyNames", {"UserName": user_name},
+            token_param="Marker", token_field="Marker", truncated_field="IsTruncated",
+        )
+        for policy_name in policy_names:
             try:
                 pol_detail = iam_client.get_user_policy(UserName=user_name, PolicyName=policy_name)
                 policy_doc = pol_detail.get("PolicyDocument", {})
@@ -77,14 +82,18 @@ def check_user_wildcard_policies(iam_client: Any, user_name: str) -> List[Findin
                             )
                         ))
             except ClientError:
-                pass
+                raise
     except ClientError:
-        pass
+        raise
 
     # 2. Check attached managed policies
     try:
-        attached_resp = iam_client.list_attached_user_policies(UserName=user_name)
-        for pol in attached_resp.get("AttachedPolicies", []):
+        attached_policies = collect_pages(
+            iam_client, "list_attached_user_policies", "AttachedPolicies",
+            {"UserName": user_name}, token_param="Marker", token_field="Marker",
+            truncated_field="IsTruncated",
+        )
+        for pol in attached_policies:
             pol_arn = pol.get("PolicyArn", "")
             pol_name = pol.get("PolicyName", "")
 
@@ -126,9 +135,9 @@ def check_user_wildcard_policies(iam_client: Any, user_name: str) -> List[Findin
                                     remediation=f"aws iam detach-user-policy --user-name {user_name} --policy-arn {pol_arn}"
                                 ))
                 except ClientError:
-                    pass
+                    raise
     except ClientError:
-        pass
+        raise
 
     return findings
 
@@ -139,66 +148,51 @@ def check_user_mfa(iam_client: Any, user_name: str) -> Optional[Finding]:
     Distinguishes missing devices from API errors and verifies whether
     console access is enabled before assuming interactive console login.
     """
+    mfa_devices = collect_pages(
+        iam_client, "list_mfa_devices", "MFADevices", {"UserName": user_name},
+        token_param="Marker", token_field="Marker", truncated_field="IsTruncated",
+    )
+    if mfa_devices:
+        return None
+
     try:
-        mfa_resp = iam_client.list_mfa_devices(UserName=user_name)
-        mfa_devices = mfa_resp.get("MFADevices", [])
-        if not mfa_devices:
-            # Check console access without assuming it
-            console_status = "Unverified"
-            has_console = False
-            try:
-                if hasattr(iam_client, "get_login_profile"):
-                    lp_resp = iam_client.get_login_profile(UserName=user_name)
-                    if isinstance(lp_resp, dict) and "LoginProfile" in lp_resp:
-                        has_console = True
-                        console_status = "Enabled (Console Password Configured)"
-            except ClientError as e:
-                err_code = e.response.get("Error", {}).get("Code", "")
-                if err_code == "NoSuchEntity":
-                    console_status = "Not Configured (Programmatic / API Access Only)"
-                    has_console = False
-                elif err_code == "AccessDenied":
-                    console_status = "Unable to evaluate console profile (AccessDenied)"
-            except Exception:
-                console_status = "Unverified"
+        login_profile = iam_client.get_login_profile(UserName=user_name)
+    except ClientError as error:
+        error_code = error.response.get("Error", {}).get("Code", "")
+        if error_code == "NoSuchEntity":
+            return None
+        raise
 
-            remediation_text = (
-                f"Enable Multi-Factor Authentication (MFA) for user {user_name}:\n"
-                f"aws iam create-virtual-mfa-device --virtual-mfa-device-name {user_name}-mfa\n"
-                f"aws iam enable-mfa-device --user-name {user_name} --serial-number <mfa-device-arn> "
-                f"--authentication-code-1 <code1> --authentication-code-2 <code2>"
-            )
-            if not has_console and console_status.startswith("Not Configured"):
-                remediation_text = (
-                    f"User {user_name} does not have console password access configured (programmatic access only). "
-                    f"If console access is granted in the future, enforce MFA before login."
-                )
+    if not login_profile.get("LoginProfile"):
+        raise RuntimeError(f"Unable to verify console access for IAM user {user_name}.")
 
-            return Finding(
-                id=f"iam-user-no-mfa-{user_name}",
-                check_name="IAM User Without MFA Enabled",
-                resource_type="AWS::IAM::User",
-                resource_id=user_name,
-                region="global",
-                severity="MEDIUM",
-                exposure="INTERNAL",
-                sensitivity="MEDIUM",
-                evidence={
-                    "UserName": user_name,
-                    "MFADevices": [],
-                    "ConsoleAccess": console_status,
-                },
-                cis_id="CIS-1.5",
-                remediation=remediation_text,
-            )
-    except ClientError as e:
-        err_code = e.response.get("Error", {}).get("Code", "")
-        if err_code == "AccessDenied":
-            print(f"[WARN] Unable to evaluate MFA for user {user_name}: AccessDenied on list_mfa_devices")
-    return None
+    return Finding(
+        id=f"iam-user-no-mfa-{user_name}",
+            check_name="IAM User Without MFA Enabled",
+        resource_type="AWS::IAM::User",
+        resource_id=user_name,
+        region="global",
+        severity="MEDIUM",
+        exposure="INTERNAL",
+        sensitivity="MEDIUM",
+        evidence={
+            "UserName": user_name,
+            "MFADevices": [],
+            "ConsoleAccess": "Verified: Login profile configured",
+        },
+        cis_id="CIS-1.5",
+        remediation=(
+            f"Configure an MFA device for console user {user_name} using the approved identity workflow. "
+            "CloudGuard does not create or enable MFA devices."
+        ),
+    )
 
 
-def check_user_access_keys(iam_client: Any, user_name: str) -> List[Finding]:
+def check_user_access_keys(
+    iam_client: Any,
+    user_name: str,
+    now: Optional[datetime] = None,
+) -> List[Finding]:
     """
     Check for active access keys and enforce the 90-day rotation policy.
     An active key that is 0 days old must NOT be flagged as overdue for rotation.
@@ -206,46 +200,37 @@ def check_user_access_keys(iam_client: Any, user_name: str) -> List[Finding]:
     """
     findings = []
     try:
-        keys_resp = iam_client.list_access_keys(UserName=user_name)
-        now = datetime.now(timezone.utc)
+        keys = collect_pages(
+            iam_client, "list_access_keys", "AccessKeyMetadata",
+            {"UserName": user_name}, token_param="Marker", token_field="Marker",
+            truncated_field="IsTruncated",
+        )
+        now = now or datetime.now(timezone.utc)
 
-        for key_meta in keys_resp.get("AccessKeyMetadata", []):
+        for key_meta in keys:
             if key_meta.get("Status") == "Active":
                 key_id = key_meta.get("AccessKeyId", "")
                 created_date = key_meta.get("CreateDate")
 
-                # Handle date edge cases & timezone awareness
-                if created_date:
-                    if created_date.tzinfo is None:
-                        created_date = created_date.replace(tzinfo=timezone.utc)
-                    age_days = (now - created_date).days
-                    # Guard against negative age due to minor clock skew
-                    if age_days < 0:
-                        age_days = 0
-                else:
-                    age_days = 0
-
-                is_overdue = age_days > 90
-
-                if is_overdue:
-                    # Enforce 90-day rotation policy strictly
-                    check_name = "IAM User Has Active Access Key Overdue for Rotation (>90 Days)"
-                    severity = "HIGH"
-                    remediation = (
-                        f"Access key {key_id} is {age_days} days old (>90 days overdue). Rotate key:\n"
-                        f"1. Generate replacement key: aws iam create-access-key --user-name {user_name}\n"
-                        f"2. Update workloads with new credentials.\n"
-                        f"3. Deactivate old key: aws iam update-access-key --access-key-id {key_id} --status Inactive --user-name {user_name}\n"
-                        f"4. Delete old key: aws iam delete-access-key --access-key-id {key_id} --user-name {user_name}"
+                if not isinstance(created_date, datetime):
+                    raise RuntimeError(
+                        f"Unable to evaluate rotation age for active access key {key_id}: CreateDate is missing or invalid."
                     )
-                else:
-                    # Compliant key within rotation window (0 - 90 days)
-                    check_name = "IAM User Has Active Access Key"
-                    severity = "LOW"
-                    remediation = (
-                        f"Access key {key_id} is {age_days} day(s) old and complies with the 90-day rotation policy. "
-                        f"Track key age and plan rotation prior to reaching 90 days."
-                    )
+
+                if created_date.tzinfo is None:
+                    created_date = created_date.replace(tzinfo=timezone.utc)
+                elapsed = max(now - created_date, timedelta(0))
+                if elapsed <= timedelta(days=90):
+                    continue
+                age_days = ceil(elapsed.total_seconds() / 86400 * 100) / 100
+
+                check_name = "IAM User Has Active Access Key Overdue for Rotation (>90 Days)"
+                remediation = (
+                    f"Access key {key_id} is {age_days} days old (>90 days overdue). Review and rotate it manually:\n"
+                    f"1. Generate a replacement key and update workloads.\n"
+                    f"2. Verify the replacement works before deactivating the old key.\n"
+                    f"3. Deactivate and later delete the old key after verification."
+                )
 
                 findings.append(Finding(
                     id=f"iam-active-access-key-{user_name}-{key_id}",
@@ -253,24 +238,22 @@ def check_user_access_keys(iam_client: Any, user_name: str) -> List[Finding]:
                     resource_type="AWS::IAM::User",
                     resource_id=user_name,
                     region="global",
-                    severity=severity,
+                    severity="HIGH",
                     exposure="INTERNAL",
                     sensitivity="MEDIUM",
                     evidence={
                         "AccessKeyId": key_id,
                         "Status": "Active",
                         "AgeDays": age_days,
-                        "IsOverdueForRotation": is_overdue,
+                        "IsOverdueForRotation": True,
                         "RotationThresholdDays": 90,
                         "CreateDate": str(created_date) if created_date else "Unknown",
                     },
                     cis_id="CIS-1.14",
                     remediation=remediation,
                 ))
-    except ClientError as e:
-        err_code = e.response.get("Error", {}).get("Code", "")
-        if err_code == "AccessDenied":
-            print(f"[WARN] Unable to evaluate access keys for user {user_name}: AccessDenied on list_access_keys")
+    except ClientError:
+        raise
     return findings
 
 
@@ -278,8 +261,11 @@ def check_overprivileged_roles(iam_client: Any) -> List[Finding]:
     """Audit IAM roles for broad AdministratorAccess or wildcard permissions."""
     findings = []
     try:
-        roles_resp = iam_client.list_roles()
-        for role in roles_resp.get("Roles", []):
+        roles = collect_pages(
+            iam_client, "list_roles", "Roles", token_param="Marker",
+            token_field="Marker", truncated_field="IsTruncated",
+        )
+        for role in roles:
             role_name = role.get("RoleName", "")
             role_path = role.get("Path", "")
 
@@ -289,8 +275,12 @@ def check_overprivileged_roles(iam_client: Any) -> List[Finding]:
 
             # Check attached managed policies
             try:
-                attached = iam_client.list_attached_role_policies(RoleName=role_name)
-                for pol in attached.get("AttachedPolicies", []):
+                attached_policies = collect_pages(
+                    iam_client, "list_attached_role_policies", "AttachedPolicies",
+                    {"RoleName": role_name}, token_param="Marker", token_field="Marker",
+                    truncated_field="IsTruncated",
+                )
+                for pol in attached_policies:
                     pol_arn = pol.get("PolicyArn", "")
                     pol_name = pol.get("PolicyName", "")
 
@@ -311,7 +301,7 @@ def check_overprivileged_roles(iam_client: Any) -> List[Finding]:
                             )
                         ))
             except ClientError:
-                pass
+                raise
     except ClientError as e:
         print(f"[ERROR] IAM list_roles failed (Unable to evaluate IAM roles): {e}")
         raise
@@ -327,10 +317,11 @@ def scan_iam(client: Optional[Any] = None) -> List[Finding]:
     findings: List[Finding] = []
 
     try:
-        users_resp = iam_client.list_users()
-        users = users_resp.get("Users", [])
-    except ClientError as e:
-        print(f"[ERROR] IAM list_users failed (Unable to evaluate IAM users): {e}")
+        users = collect_pages(
+            iam_client, "list_users", "Users", token_param="Marker",
+            token_field="Marker", truncated_field="IsTruncated",
+        )
+    except ClientError:
         raise
 
     for user in users:

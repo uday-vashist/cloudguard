@@ -132,7 +132,7 @@ def test_generate_html_report_empty_findings(tmp_path: Path):
     assert "Zero Misconfigurations Detected" in content
     assert "Total Findings" in content
     assert ">0<" in content  # Total count is 0
-    assert "All scanned AWS resources in this environment comply" in content
+    assert "No confirmed misconfigurations were detected in the checks that completed." in content
 
 
 def test_output_directory_auto_creation(tmp_path: Path):

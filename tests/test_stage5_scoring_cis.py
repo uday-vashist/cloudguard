@@ -90,10 +90,9 @@ def test_cis_benchmark_mapping_all_checks():
         ("S3 Bucket Public Access via Policy", "CIS-2.1.1"),
         ("S3 Bucket Block Public Access Disabled", "CIS-2.1.2"),
         ("S3 Bucket Public Access via ACL", "CIS-2.1.2"),
-        ("S3 Bucket Missing Default Encryption", "CIS-2.1.3"),
         ("IAM Policy Grants Wildcard Administrative Privileges (*:*)", "CIS-1.16"),
         ("IAM User Without MFA Enabled", "CIS-1.5"),
-        ("IAM User Has Active Access Key", "CIS-1.14"),
+        ("IAM User Has Active Access Key Overdue for Rotation (>90 Days)", "CIS-1.14"),
         ("IAM Role Has Full Administrative Access", "CIS-1.16"),
         ("Security Group Ingress Allows Port 22 (SSH) from 0.0.0.0/0", "CIS-5.2"),
         ("Security Group Ingress Allows Port 3389 (RDP) from 0.0.0.0/0", "CIS-5.3"),
@@ -101,14 +100,15 @@ def test_cis_benchmark_mapping_all_checks():
         ("Security Group Ingress Allows Database Port 5432 (PostgreSQL) from 0.0.0.0/0", "CIS-5.4"),
         ("CloudTrail Not Enabled In All Regions", "CIS-3.1"),
         ("CloudTrail Log File Validation Disabled", "CIS-3.2"),
-        ("Missing CloudWatch Metric Alarms for Critical Security Events", "CIS-3.4"),
+        ("Missing CloudWatch Metric Alarms for Critical Security Events in Audited Region", "CIS-3.4"),
     ]
 
     for check_name, expected_cis in test_cases:
         actual_cis = get_cis_id_for_check(check_name)
         assert actual_cis == expected_cis, f"Check '{check_name}' expected {expected_cis}, got {actual_cis}"
         # Ensure metadata exists for every mapped CIS control
-        assert actual_cis in CIS_CONTROLS_METADATA
+        if actual_cis != "N/A":
+            assert actual_cis in CIS_CONTROLS_METADATA
 
 
 def test_tag_findings_with_cis_populates_findings():

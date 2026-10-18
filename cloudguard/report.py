@@ -572,6 +572,64 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
       border-top: 1px solid var(--border-color);
       padding-top: 1.5rem;
     }
+
+    :root {
+      --bg-primary: #f3f5f6;
+      --bg-secondary: #ffffff;
+      --bg-tertiary: #eef1f2;
+      --card-bg: #ffffff;
+      --border-color: #d8dee1;
+      --text-primary: #20282d;
+      --text-secondary: #4c5a61;
+      --text-muted: #68767d;
+      --color-critical: #a32d32;
+      --color-critical-bg: #fae9e9;
+      --color-high: #a34c18;
+      --color-high-bg: #faeee5;
+      --color-medium: #84620b;
+      --color-medium-bg: #f7f1dc;
+      --color-low: #365f7d;
+      --color-low-bg: #eaf1f6;
+      --color-safe: #316b4a;
+      --color-safe-bg: #e9f2ec;
+      --color-purple: #465b66;
+      --color-purple-bg: #eef1f2;
+    }
+
+    body { background: var(--bg-primary); color: var(--text-primary); }
+    header, .controls-bar, .summary-card, .finding-card { background: #fff; }
+    header, .summary-card, .controls-bar, .finding-card { border-radius: 6px; }
+    .summary-card::before { display: none; }
+    .brand-icon { background: #eef1f2; border-color: #d8dee1; color: #365f7d; }
+    .meta-pill { background: #eef1f2; color: #4c5a61; border-radius: 4px; }
+    .partial-audit-banner { background: #fff7ed; border-color: #c26b2d; border-radius: 6px; }
+    .partial-audit-text p { color: #69421f; }
+    .failed-scanner-tag { background: #fff; border-color: #d8b28d; color: #69421f; }
+    .filter-btn { background: #f3f5f6; color: #4c5a61; }
+    .filter-btn.active { background: #365f7d; border-color: #365f7d; }
+    .search-input { background: #fff; color: #20282d; }
+    .clean-audit-banner { padding: 1.5rem; border-radius: 6px; }
+    .finding-score-pill { border-radius: 4px; }
+    .badge-INFO { background: #eef1f2; color: #465b66; border: 1px solid #d8dee1; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border-color); background: #fff; border-radius: 6px; }
+    .findings-table { width: 100%; border-collapse: collapse; min-width: 850px; text-align: left; }
+    .findings-table th, .findings-table td { padding: 0.75rem; border-bottom: 1px solid var(--border-color); vertical-align: top; }
+    .findings-table th { background: #eef1f2; color: #4c5a61; font-size: 0.75rem; text-transform: uppercase; }
+    .findings-table tr:last-child td { border-bottom: 0; }
+    .findings-table .resource-code { overflow-wrap: anywhere; color: #365f7d; background: #f3f5f6; }
+    .table-details { min-width: 180px; max-width: 280px; }
+    .table-details summary { cursor: pointer; color: #365f7d; font-weight: 600; }
+    .table-details pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .remediation-cell { min-width: 220px; max-width: 360px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 700px) {
+      body { padding: 1rem 0.75rem; }
+      header { padding: 1rem; }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-card { padding: 0.9rem; }
+      .summary-card-value { font-size: 1.5rem; }
+      .controls-bar { align-items: stretch; }
+      .search-box { max-width: none; }
+    }
   </style>
 </head>
 <body>
@@ -579,7 +637,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     <!-- Header -->
     <header>
       <div class="brand">
-        <div class="brand-icon">🛡️</div>
+        <div class="brand-icon">CG</div>
         <div>
           <h1>CloudGuard Security Audit Report</h1>
           <p>Read-Only Cloud Security Posture Management & CIS Foundations Benchmark</p>
@@ -610,7 +668,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     <!-- Executive Summary Metrics -->
     <section class="summary-grid">
       <div class="summary-card total">
-        <span class="summary-card-label">Total Findings</span>
+        <span class="summary-card-label">Total Findings &amp; Observations</span>
         <span class="summary-card-value">{{ total_findings }}</span>
         <span class="summary-card-desc">Audited misconfigurations</span>
       </div>
@@ -634,10 +692,20 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         <span class="summary-card-value">{{ counts.LOW }}</span>
         <span class="summary-card-desc">Informational & lifecycle</span>
       </div>
+      <div class="summary-card total">
+        <span class="summary-card-label">Informational</span>
+        <span class="summary-card-value">{{ counts.INFO }}</span>
+        <span class="summary-card-desc">Unverified status; zero risk score</span>
+      </div>
       <div class="summary-card score">
         <span class="summary-card-label">Max Risk Score</span>
         <span class="summary-card-value">{{ max_risk_score }}</span>
-        <span class="summary-card-desc">Peak threat (Range: 1.0 - 50.0)</span>
+        <span class="summary-card-desc">Highest individual confirmed score</span>
+      </div>
+      <div class="summary-card score">
+        <span class="summary-card-label">Aggregate Risk</span>
+        <span class="summary-card-value">{{ aggregate_risk_score }}</span>
+        <span class="summary-card-desc">Sum of confirmed finding scores</span>
       </div>
     </section>
 
@@ -646,7 +714,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
     <div class="clean-audit-banner">
       <div class="clean-audit-icon">✅</div>
       <h2>Zero Misconfigurations Detected</h2>
-      <p>All scanned AWS resources in this environment comply with configured CIS benchmarks and security baselines. No public exposures, excessive permissions, or unencrypted storage assets were found.</p>
+      <p>No confirmed misconfigurations were detected in the checks that completed.</p>
     </div>
     {% else %}
     <!-- Filter & Search Controls -->
@@ -657,6 +725,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         <button class="filter-btn" data-filter="HIGH">High ({{ counts.HIGH }})</button>
         <button class="filter-btn" data-filter="MEDIUM">Medium ({{ counts.MEDIUM }})</button>
         <button class="filter-btn" data-filter="LOW">Low ({{ counts.LOW }})</button>
+        <button class="filter-btn" data-filter="INFO">Info ({{ counts.INFO }})</button>
       </div>
       <div class="search-box">
         <input type="text" id="searchInput" class="search-input" placeholder="Search check, resource, or CIS..." />
@@ -670,46 +739,23 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
         <span class="findings-count-badge" id="visibleCount">Showing {{ total_findings }} of {{ total_findings }} findings</span>
       </div>
 
-      <div class="findings-list" id="findingsList">
+      <div class="table-wrap">
+      <table class="findings-table" id="findingsList">
+        <thead><tr><th>Risk</th><th>Severity</th><th>Check</th><th>Resource / Region</th><th>CIS</th><th>Evidence</th><th>Remediation guidance</th></tr></thead>
+        <tbody>
         {% for f in findings %}
-        <article class="finding-card" data-severity="{{ f.severity }}" data-search="{{ f.check_name | lower }} {{ f.resource_id | lower }} {{ f.cis_id | lower }} {{ f.resource_type | lower }}">
-          <div class="finding-top-row">
-            <div class="finding-title-group">
-              <span class="finding-rank">#{{ loop.index }}</span>
-              <span class="badge badge-{{ f.severity }}">{{ f.severity }}</span>
-              {% if f.cis_id != "N/A" %}
-              <span class="badge badge-cis">{{ f.cis_id }}</span>
-              {% endif %}
-              <h3 class="finding-title">{{ f.check_name }}</h3>
-            </div>
-            <span class="finding-score-pill">Risk Score: {{ f.risk_score }}</span>
-          </div>
-
-          <div class="finding-meta-row">
-            <span class="meta-item"><strong>Resource:</strong> <span class="resource-code">{{ f.resource }}</span></span>
-            <span class="meta-item"><strong>Region:</strong> {{ f.region }}</span>
-            <span class="meta-item"><strong>Exposure:</strong> <span class="badge badge-{{ f.exposure }}">{{ f.exposure }}</span></span>
-            <span class="meta-item"><strong>Sensitivity:</strong> {{ f.sensitivity }}</span>
-            {% if f.cis_metadata %}
-            <span class="meta-item"><strong>CIS Control:</strong> {{ f.cis_metadata.title }}</span>
-            {% endif %}
-          </div>
-
-          <details class="evidence-details">
-            <summary>🔎 View Raw AWS Evidence</summary>
-            <pre class="evidence-content"><code>{{ f.evidence | to_json }}</code></pre>
-          </details>
-
-          {% if f.remediation %}
-          <div class="remediation-box">
-            <div class="remediation-label">⚡ Recommended Remediation Guidance</div>
-            <pre class="remediation-code"><code>{{ f.remediation }}</code></pre>
-          </div>
-          {% else %}
-          <div class="remediation-empty">No remediation guidance specified for this finding.</div>
-          {% endif %}
-        </article>
+        <tr class="finding-card" data-severity="{{ f.severity }}" data-search="{{ f.check_name | lower }} {{ f.resource_id | lower }} {{ f.cis_id | lower }} {{ f.resource_type | lower }}">
+          <td><strong>{{ f.risk_score }}</strong></td>
+          <td><span class="badge badge-{{ f.severity }}">{{ f.severity }}</span></td>
+          <td>{{ f.check_name }}</td>
+          <td><span class="resource-code">{{ f.resource }}</span><br>{{ f.region }}</td>
+          <td>{% if f.cis_id != "N/A" %}{{ f.cis_id }}{% if f.cis_metadata %}<br><small>{{ f.cis_metadata.title }}</small>{% endif %}{% else %}Not mapped{% endif %}</td>
+          <td><details class="table-details"><summary>View evidence</summary><pre>{{ f.evidence | to_json }}</pre></details></td>
+          <td class="remediation-cell">{% if f.remediation %}{{ f.remediation }}{% else %}No remediation guidance specified for this finding.{% endif %}</td>
+        </tr>
         {% endfor %}
+        </tbody>
+      </table>
       </div>
     </section>
     {% endif %}
@@ -740,7 +786,7 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
           const matchesSearch = (!currentQuery || cardSearch.includes(currentQuery));
 
           if (matchesFilter && matchesSearch) {
-            card.style.display = 'block';
+            card.style.display = 'table-row';
             visibleCount++;
           } else {
             card.style.display = 'none';
@@ -774,10 +820,26 @@ REPORT_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+def _redact_sensitive(value: Any) -> Any:
+  """Redact credential-like values before evidence is embedded in the report."""
+  if isinstance(value, dict):
+    redacted = {}
+    for key, item in value.items():
+      normalized_key = str(key).lower().replace("_", "").replace("-", "")
+      if any(term in normalized_key for term in ("secret", "password", "token", "credential", "authorization", "privatekey")):
+        redacted[key] = "[REDACTED]"
+      else:
+        redacted[key] = _redact_sensitive(item)
+    return redacted
+  if isinstance(value, (list, tuple)):
+    return [_redact_sensitive(item) for item in value]
+  return value
+
+
 def _to_pretty_json(value: Any) -> str:
     """Format dictionary/data as formatted JSON string for safe template rendering."""
     try:
-        return json.dumps(value, indent=2, default=str)
+        return json.dumps(_redact_sensitive(value), indent=2, default=str)
     except Exception:
         return str(value)
 
@@ -818,6 +880,7 @@ def generate_html_report(
     # 3. Compute summary metrics
     total_findings = len(findings)
     counts = {
+      "INFO": 0,
         "CRITICAL": 0,
         "HIGH": 0,
         "MEDIUM": 0,
@@ -825,6 +888,7 @@ def generate_html_report(
     }
 
     max_risk_score = 0.0
+    aggregate_risk_score = 0.0
 
     for f in findings:
         sev = f.severity.upper()
@@ -832,6 +896,7 @@ def generate_html_report(
             counts[sev] += 1
         if f.risk_score > max_risk_score:
             max_risk_score = f.risk_score
+        aggregate_risk_score += f.risk_score
 
     max_risk_score = round(max_risk_score, 1)
 
@@ -859,6 +924,7 @@ def generate_html_report(
         total_findings=total_findings,
         counts=counts,
         max_risk_score=max_risk_score,
+        aggregate_risk_score=round(aggregate_risk_score, 1),
         profile=profile,
         region=region,
         generated_at=now_utc,

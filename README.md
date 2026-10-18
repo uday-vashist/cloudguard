@@ -11,25 +11,26 @@ CloudGuard implements four specialized audit scanners adhering strictly to read-
 
 | Domain | Scanner Module | Inspected Security Checks | CIS Benchmark |
 | :--- | :--- | :--- | :--- |
-| **Storage** | [`cloudguard/scanners/s3_scanner.py`](cloudguard/scanners/s3_scanner.py) | • S3 Bucket Public Access via Policy (`Principal: *`)<br>• S3 Block Public Access (BPA) Disabled<br>• Public Bucket ACLs (`AllUsers` / `AuthenticatedUsers`)<br>• Missing Default Server-Side Encryption (SSE) | CIS-2.1.1<br>CIS-2.1.2<br>CIS-2.1.2<br>CIS-2.1.3 |
-| **Identity** | [`cloudguard/scanners/iam_scanner.py`](cloudguard/scanners/iam_scanner.py) | • Wildcard Administrative Privileges (`*:*` in user policies)<br>• Active IAM Users without MFA Enabled<br>• Active and Unrotated Access Keys (>90 days)<br>• Overprivileged IAM Roles (`AdministratorAccess`) | CIS-1.16<br>CIS-1.5<br>CIS-1.14<br>CIS-1.16 |
+| **Storage** | [`cloudguard/scanners/s3_scanner.py`](cloudguard/scanners/s3_scanner.py) | • S3 Bucket Public Access via Policy (`Principal: *`)<br>• Incomplete S3 Block Public Access settings<br>• Public Bucket ACLs (`AllUsers` / `AuthenticatedUsers`)<br>• Explicit default encryption status as an informational observation only | CIS-2.1.1<br>CIS-2.1.2<br>CIS-2.1.2 |
+| **Identity** | [`cloudguard/scanners/iam_scanner.py`](cloudguard/scanners/iam_scanner.py) | • Wildcard Administrative Privileges (`*:*` in user policies)<br>• Verified console users without MFA<br>• Active access keys older than 90 days (90 days is within policy)<br>• Overprivileged IAM Roles (`AdministratorAccess`) | CIS-1.16<br>CIS-1.5<br>CIS-1.14<br>CIS-1.16 |
 | **Network** | [`cloudguard/scanners/sg_scanner.py`](cloudguard/scanners/sg_scanner.py) | • Public ingress (`0.0.0.0/0` / `::/0`) on SSH (TCP 22)<br>• Public ingress on RDP (TCP 3389)<br>• Public ingress on database ports (MySQL 3306, PostgreSQL 5432, MSSQL 1433, MongoDB 27017, Redis 6379, Oracle 1521) | CIS-5.2<br>CIS-5.3<br>CIS-5.4 |
-| **Logging** | [`cloudguard/scanners/monitoring_scanner.py`](cloudguard/scanners/monitoring_scanner.py) | • CloudTrail not enabled across all regions<br>• CloudTrail log file validation disabled<br>• Missing CloudWatch alarms for critical security events<br>• Complete absence of configured CloudTrail trails | CIS-3.1<br>CIS-3.2<br>CIS-3.4<br>CIS-3.1 |
+| **Logging** | [`cloudguard/scanners/monitoring_scanner.py`](cloudguard/scanners/monitoring_scanner.py) | • CloudTrail multi-region coverage and log validation<br>• CloudWatch security alarm candidates; configuration is explicitly unverified<br>• Empty regional CloudTrail results are not treated as account-wide absence | CIS-3.1<br>CIS-3.2<br>CIS-3.4 |
 
 ---
 
 ## 2. Risk Prioritization & Compliance Mapping
 
 ### 3-Factor Multiplicative Risk Formula
-Traditional severity rankings (Low/Medium/High/Critical) fail to differentiate between an isolated test asset and an internet-exposed production database. CloudGuard calculates a numeric risk score ($1.0 - 50.0$) using a 3-factor multiplicative formula:
+Traditional severity rankings (Low/Medium/High/Critical) fail to differentiate between an isolated test asset and an internet-exposed production database. CloudGuard calculates a numeric risk score ($0.0 - 50.0$) using a 3-factor multiplicative formula:
 
 $$\text{Risk Score} = \text{Severity Weight} \times \text{Exposure Multiplier} \times \text{Resource Sensitivity Multiplier}$$
 
 - **Severity Weight (Inherent technical flaw):**
   - `CRITICAL` (10.0): Wildcard `*:*` admin rights, open SSH/DB, public bucket policy.
-  - `HIGH` (7.0): Disabled S3 BPA, unencrypted bucket, single-region CloudTrail.
+  - `HIGH` (7.0): Disabled S3 BPA or single-region CloudTrail when no multi-region trail is present.
   - `MEDIUM` (4.0): User without MFA, disabled log validation, missing alarms.
-  - `LOW` (1.0): Active access keys requiring rotation tracking.
+  - `LOW` (1.0): Low-severity confirmed security issue.
+  - `INFO` (0.0): Unverified status or observation; contributes no risk.
 - **Exposure Multiplier (Attack reachability):**
   - `PUBLIC` (2.0): Directly reachable from `0.0.0.0/0` or open internet policy.
   - `INTERNAL` (1.0): Contained inside VPC private subnets or internal account boundaries.
@@ -39,7 +40,9 @@ $$\text{Risk Score} = \text{Severity Weight} \times \text{Exposure Multiplier} \
   - `MEDIUM` (1.5): Standard application workloads and operational tooling.
   - `LOW` (1.0): Non-sensitive, internal baseline assets.
 
-*Multiplicative Advantage:* Multiplicative scoring provides a 50x dynamic range ($50.0$ peak down to $1.0$), ensuring that exposed critical assets immediately command auditor attention rather than getting lost in flat additive scoring.
+*Multiplicative Advantage:* Confirmed findings range up to $50.0$; INFO observations are zero-score and excluded from aggregate risk.
+
+The **aggregate risk** shown in the CLI and report is the sum of individual finding scores. Informational observations score zero and are shown separately from confirmed risk. Unknown scoring labels are rejected instead of silently assigned a default score.
 
 ### CIS AWS Foundations Benchmark Control Mapping
 Every finding is enriched by [`cloudguard/cis_mapping.py`](cloudguard/cis_mapping.py) with official CIS control identifiers and descriptive metadata (title, section, description), allowing audit findings to serve directly as compliance evidence.
@@ -50,8 +53,9 @@ Every finding is enriched by [`cloudguard/cis_mapping.py`](cloudguard/cis_mappin
 
 CloudGuard renders a self-contained HTML report ([`cloudguard/report.py`](cloudguard/report.py)) saved by default to `reports/audit_report.html`:
 - **Air-Gapped & Self-Contained:** Built with embedded CSS and Vanilla JS. Requires zero external CDN requests, font downloads, or internet connectivity to view.
-- **Executive Summary:** Metric cards displaying total findings, counts by severity, and peak risk score.
-- **Live Filtering & Search:** Client-side severity filtering (All / Critical / High / Medium / Low) and instant free-text search across IDs, resources, and check titles.
+- **Executive Summary:** Metric cards displaying confirmed findings, INFO observations, peak score, and aggregate risk.
+- **Live Filtering & Search:** Client-side severity filtering and instant free-text search across resources and check titles.
+- **Evidence handling:** Dynamic HTML is escaped, and secret-like evidence fields are redacted before rendering.
 - **Collapsible Audit Evidence:** Expandable details blocks revealing the raw JSON API proof from AWS.
 - **Remediation Guidance:** Suggested, copyable AWS CLI commands for addressing findings. Review each command and its potential impact before executing it; remediation commands may modify AWS resources.
 - **Partial Audit Safety Warning:** If one or more scanners encounter an error during an audit, the report visibly renders a prominent warning banner listing the failed scanners, alerting users that the audit is incomplete.
@@ -93,9 +97,9 @@ pip install -r requirements.txt
 
 ### 2. Run Automated Tests
 
-Run the automated test suite. Note that `tests/smoke_test.py::test_aws_sts_connectivity` may contact AWS STS if valid credentials are configured:
+Run the offline automated suite. The separate `tests/smoke_test.py` module contains an explicit STS connectivity check and is excluded here to guarantee that this command makes no AWS calls:
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -v
+.\.venv\Scripts\python.exe -m pytest -v --ignore=tests/smoke_test.py
 ```
 
 ---
@@ -167,12 +171,12 @@ CloudGuard includes a dedicated ground-truth validation engine ([`tests/validate
  (Synthetic Mock Environment - No live AWS calls or credentials used)
 ==========================================================================
  Ground Truth Source : tests/expected_findings.json
- Total Expected Items: 14
- Total Scanned Items : 14
+ Total Expected Items: 11
+ Total Scanned Items : 11
 --------------------------------------------------------------------------
  OVERALL DETECTION METRICS
 --------------------------------------------------------------------------
- True Positives  (TP) : 14
+ True Positives  (TP) : 11
  False Positives (FP) : 0
  False Negatives (FN) : 0
  Precision            : 100.0%
@@ -185,16 +189,16 @@ CloudGuard includes a dedicated ground-truth validation engine ([`tests/validate
 --------------------------------------------------------------------------
  Category         Expected   Actual    TP    FP    FN  Precision   Recall
  ---------------- -------- -------- ----- ----- ----- ---------- --------
- S3                      3        3     3     0     0     100.0%   100.0%
- IAM                     4        4     4     0     0     100.0%   100.0%
+ S3                      2        2     2     0     0     100.0%   100.0%
+ IAM                     3        3     3     0     0     100.0%   100.0%
  SECURITY_GROUP          4        4     4     0     0     100.0%   100.0%
- MONITORING              3        3     3     0     0     100.0%   100.0%
+ MONITORING              2        2     2     0     0     100.0%   100.0%
 ==========================================================================
 ```
 
 ### Understanding the Validation Metrics
-- **Ground Truth ([`tests/expected_findings.json`](tests/expected_findings.json)):** Manifest of 14 deliberate misconfigurations across S3, IAM, Security Groups, and Monitoring.
-- **Synthetic Mock Environment:** Synthetic boto3 client mocks mirroring both the 14 misconfigurations and compliant baseline resources (e.g. compliant S3 buckets, internal-only SGs, compliant trails) to test negative discrimination.
+- **Ground Truth ([`tests/expected_findings.json`](tests/expected_findings.json)):** Manifest of 11 confirmed misconfigurations across S3, IAM, Security Groups, and Monitoring. Compliant keys, unverified S3 object encryption, and redundant single-region trails are not counted as vulnerabilities.
+- **Synthetic Mock Environment:** Synthetic boto3 client mocks mirroring the 11 confirmed misconfigurations and compliant baseline resources. INFO observations are excluded from precision/recall.
 - **Bijective 1-to-1 Matching:** An actual finding matches an expected item only once. Security group checks require exact exposed port matches (22, 3389, 3306, 5432), preventing findings with identical CIS IDs (e.g. `CIS-5.4`) from falsely matching different ports.
 - **Metrics:**
   - $\text{True Positives (TP)}$: Planted misconfigurations correctly detected.
@@ -218,7 +222,7 @@ It is important to distinguish between CloudGuard's offline validation and a liv
 | **Cloud Costs** | No AWS infrastructure or API usage required by the validator | Costs are not guaranteed to be zero; check applicable AWS pricing |
 | **Verification Scope** | Tests scanner behavior, scoring, and matching against synthetic cases | Evaluates the security posture visible to the configured IAM identity |
 
-The offline validator currently reports 14 true positives, zero false positives, and zero false negatives against its synthetic test cases. These results demonstrate matching performance in the mock environment and do not establish detection accuracy against real AWS accounts.
+The offline validator currently reports 11 true positives, zero false positives, and zero false negatives against its synthetic test cases. These results demonstrate matching performance in the mock environment and do not establish detection accuracy against real AWS accounts.
 
 ### Planned Next Step: Live AWS Account Audit
 
@@ -268,7 +272,7 @@ cloudguard/
 │   └── main.py                     # CLI orchestrator & smoke test entry point
 ├── terraform/                      # Intentionally vulnerable AWS testbed templates; review before deployment
 ├── tests/                          # Automated tests and offline validation
-│   ├── expected_findings.json      # Ground truth manifest (14 benchmark flaws)
+│   ├── expected_findings.json      # Confirmed ground truth manifest (11 cases)
 │   ├── smoke_test.py               # Safety wrapper & STS smoke tests
 │   ├── test_pipeline.py            # End-to-end CLI & pipeline tests
 │   ├── test_stage3_scanners.py     # S3 and IAM scanner unit tests

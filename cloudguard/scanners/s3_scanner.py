@@ -3,9 +3,9 @@ CloudGuard S3 Storage Security Scanner.
 
 Audits Amazon S3 storage resources against security misconfigurations:
 1. Public Bucket Policy (Policy granting public access to Principal "*")
-2. Block Public Access (BPA) Disabled
+2. Incomplete Block Public Access (BPA) settings
 3. Public Bucket ACLs (Grants to AllUsers or AuthenticatedUsers)
-4. Missing Default Server-Side Encryption (SSE)
+4. Explicit default encryption status (informational; existing objects are not inspected)
 
 VIVA CONCEPTS:
 - Principle: S3 buckets must be private by default. Data leaks often occur due to
@@ -16,14 +16,26 @@ VIVA CONCEPTS:
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 from botocore.exceptions import ClientError
-from cloudguard.aws_session import get_client, ReadOnlyClientWrapper
+from cloudguard.aws_session import get_client
 from cloudguard.models import Finding
+from cloudguard.scanners._utils import collect_pages
 
 # Well-known public grantee URIs in AWS S3 ACLs
 PUBLIC_ALL_USERS_URI = "http://acs.amazonaws.com/groups/global/AllUsers"
 PUBLIC_AUTH_USERS_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+
+
+def _has_public_principal(principal: Any) -> bool:
+    if principal == "*":
+        return True
+    if not isinstance(principal, dict):
+        return False
+    return any(
+        value == "*" or (isinstance(value, list) and "*" in value)
+        for value in principal.values()
+    )
 
 
 def check_bucket_policy(s3_client: Any, bucket_name: str, region: str) -> Optional[Finding]:
@@ -34,7 +46,8 @@ def check_bucket_policy(s3_client: Any, bucket_name: str, region: str) -> Option
     # 1. Try get_bucket_policy_status (boto3 official helper)
     try:
         status_resp = s3_client.get_bucket_policy_status(Bucket=bucket_name)
-        if status_resp.get("PolicyStatus", {}).get("IsPublic", False):
+        policy_status = status_resp.get("PolicyStatus", {})
+        if policy_status.get("IsPublic") is True:
             return Finding(
                 id=f"s3-public-policy-{bucket_name}",
                 check_name="S3 Bucket Public Access via Policy",
@@ -50,11 +63,13 @@ def check_bucket_policy(s3_client: Any, bucket_name: str, region: str) -> Option
                     f"Or apply S3 Block Public Access to prevent public policies."
                 )
             )
+        if "IsPublic" in policy_status:
+            return None
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
-        # NoSuchBucketPolicy is normal for buckets without policy
-        if error_code not in ("NoSuchBucketPolicy", "AccessDenied"):
-            pass
+        if error_code != "NoSuchBucketPolicy":
+            raise
+        return None
 
     # 2. Inspect raw bucket policy if available
     try:
@@ -62,10 +77,13 @@ def check_bucket_policy(s3_client: Any, bucket_name: str, region: str) -> Option
         raw_policy = policy_resp.get("Policy", "{}")
         policy_doc = json.loads(raw_policy) if isinstance(raw_policy, str) else raw_policy
 
-        for stmt in policy_doc.get("Statement", []):
+        statements = policy_doc.get("Statement", [])
+        if isinstance(statements, dict):
+            statements = [statements]
+        for stmt in statements:
             if stmt.get("Effect") == "Allow":
                 principal = stmt.get("Principal")
-                if principal == "*" or principal == {"AWS": "*"}:
+                if _has_public_principal(principal):
                     return Finding(
                         id=f"s3-public-policy-{bucket_name}",
                         check_name="S3 Bucket Public Access via Policy",
@@ -80,8 +98,8 @@ def check_bucket_policy(s3_client: Any, bucket_name: str, region: str) -> Option
                     )
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
-        if error_code not in ("NoSuchBucketPolicy", "AccessDenied"):
-            pass
+        if error_code != "NoSuchBucketPolicy":
+            raise
 
     return None
 
@@ -98,7 +116,10 @@ def check_public_access_block(s3_client: Any, bucket_name: str, region: str) -> 
         bpa_resp = s3_client.get_public_access_block(Bucket=bucket_name)
         config = bpa_resp.get("PublicAccessBlockConfiguration", {})
 
-        disabled_settings = [k for k, v in config.items() if v is False]
+        disabled_settings = [
+            key for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")
+            if config.get(key) is not True
+        ]
 
         if disabled_settings or not config:
             return Finding(
@@ -108,7 +129,7 @@ def check_public_access_block(s3_client: Any, bucket_name: str, region: str) -> 
                 resource_id=bucket_name,
                 region=region,
                 severity="HIGH",
-                exposure="PUBLIC",
+                exposure="INTERNAL",
                 sensitivity="HIGH",
                 evidence={"PublicAccessBlockConfiguration": config, "DisabledSettings": disabled_settings},
                 remediation=(
@@ -119,7 +140,7 @@ def check_public_access_block(s3_client: Any, bucket_name: str, region: str) -> 
             )
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
-        if error_code in ("NoSuchPublicAccessBlockConfiguration", "NoSuchBucket"):
+        if error_code == "NoSuchPublicAccessBlockConfiguration":
             return Finding(
                 id=f"s3-bpa-disabled-{bucket_name}",
                 check_name="S3 Bucket Block Public Access Disabled",
@@ -136,6 +157,7 @@ def check_public_access_block(s3_client: Any, bucket_name: str, region: str) -> 
                     f"BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
                 )
             )
+        raise
     return None
 
 
@@ -171,10 +193,9 @@ def check_bucket_acl(s3_client: Any, bucket_name: str, region: str) -> Optional[
                     f"Enforce S3 Object Ownership (BucketOwnerEnforced) to disable ACLs."
                 )
             )
-    except ClientError as e:
-        error_code = e.response.get("Error", {}).get("Code", "")
-        if error_code != "AccessDenied":
-            pass
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "AccessControlListNotSupported":
+            raise
     return None
 
 
@@ -188,39 +209,38 @@ def check_bucket_encryption(s3_client: Any, bucket_name: str, region: str) -> Op
         if not rules:
             return Finding(
                 id=f"s3-missing-encryption-{bucket_name}",
-                check_name="S3 Bucket Missing Default Encryption",
+                check_name="S3 Explicit Default Encryption Configuration Unverified",
                 resource_type="AWS::S3::Bucket",
                 resource_id=bucket_name,
                 region=region,
-                severity="HIGH",
+                severity="INFO",
                 exposure="INTERNAL",
-                sensitivity="MEDIUM",
-                evidence={"ServerSideEncryptionConfiguration": enc_resp},
-                remediation=(
-                    f"aws s3api put-bucket-encryption --bucket {bucket_name} "
-                    f"--server-side-encryption-configuration "
-                    f"'{{\"Rules\": [{{\"ApplyServerSideEncryptionByDefault\": {{\"SSEAlgorithm\": \"AES256\"}}}}]}}'"
-                )
+                sensitivity="LOW",
+                evidence={
+                    "ServerSideEncryptionConfiguration": enc_resp,
+                    "Status": "No explicit default rule was returned; existing object encryption was not inspected.",
+                },
+                remediation="Verify encryption of existing objects with an approved inventory or data-classification process; configure an explicit bucket default only if required by policy.",
             )
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
-        if error_code in ("ServerSideEncryptionConfigurationNotFoundError", "NoSuchBucket"):
+        if error_code == "ServerSideEncryptionConfigurationNotFoundError":
             return Finding(
                 id=f"s3-missing-encryption-{bucket_name}",
-                check_name="S3 Bucket Missing Default Encryption",
+                check_name="S3 Explicit Default Encryption Configuration Unverified",
                 resource_type="AWS::S3::Bucket",
                 resource_id=bucket_name,
                 region=region,
-                severity="HIGH",
+                severity="INFO",
                 exposure="INTERNAL",
-                sensitivity="MEDIUM",
-                evidence={"Error": "No ServerSideEncryptionConfiguration found"},
-                remediation=(
-                    f"aws s3api put-bucket-encryption --bucket {bucket_name} "
-                    f"--server-side-encryption-configuration "
-                    f"'{{\"Rules\": [{{\"ApplyServerSideEncryptionByDefault\": {{\"SSEAlgorithm\": \"AES256\"}}}}]}}'"
-                )
+                sensitivity="LOW",
+                evidence={
+                    "Error": "No explicit ServerSideEncryptionConfiguration found",
+                    "Status": "Existing object encryption was not inspected.",
+                },
+                remediation="Verify encryption of existing objects with an approved inventory or data-classification process; configure an explicit bucket default only if required by policy.",
             )
+        raise
     return None
 
 
@@ -233,10 +253,8 @@ def scan_s3(client: Optional[Any] = None, region_name: str = "ap-south-1") -> Li
     findings: List[Finding] = []
 
     try:
-        buckets_resp = s3_client.list_buckets()
-        buckets = buckets_resp.get("Buckets", [])
-    except ClientError as e:
-        print(f"[ERROR] S3 list_buckets failed (Unable to evaluate S3 storage): {e}")
+        buckets = collect_pages(s3_client, "list_buckets", "Buckets")
+    except ClientError:
         raise
 
     for b in buckets:
@@ -248,9 +266,9 @@ def scan_s3(client: Optional[Any] = None, region_name: str = "ap-south-1") -> Li
         try:
             loc_resp = s3_client.get_bucket_location(Bucket=bucket_name)
             loc = loc_resp.get("LocationConstraint")
-            bucket_region = loc if loc else "us-east-1"
+            bucket_region = "eu-west-1" if loc == "EU" else (loc or "us-east-1")
         except ClientError:
-            bucket_region = region_name
+            raise
 
         # Run checks on this bucket
         f_policy = check_bucket_policy(s3_client, bucket_name, bucket_region)

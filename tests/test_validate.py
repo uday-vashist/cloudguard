@@ -3,7 +3,7 @@ Unit tests for CloudGuard Stage 7: Offline Detection-Validation Tool (tests/vali
 
 Verifies:
 1. Ground-truth loading from expected_findings.json.
-2. Perfect matching (TP=14, FP=0, FN=0, 100% precision, 100% recall).
+2. Perfect matching across confirmed cases (TP=11, FP=0, FN=0, 100% precision, 100% recall).
 3. Missing expected findings (FN tracking and reduced recall).
 4. Unexpected actual findings (FP tracking and reduced precision).
 5. Duplicate matching prevention (preventing double-counting of TPs).
@@ -30,10 +30,10 @@ from tests.validate import (
 
 
 def test_ground_truth_loading():
-    """Verify load_expected_findings loads all 14 testbed ground truth definitions."""
+    """Verify load_expected_findings loads all 11 confirmed ground-truth definitions."""
     findings = load_expected_findings()
     assert isinstance(findings, list)
-    assert len(findings) == 14
+    assert len(findings) == 11
 
     required_keys = {"id", "category", "check_name", "resource_type", "resource_pattern", "severity", "cis_id"}
     categories = set()
@@ -49,22 +49,22 @@ def test_perfect_matching():
     report, summary_text = run_offline_validation()
 
     assert isinstance(report, ValidationReport)
-    assert report.total_expected == 14
-    assert report.total_actual == 14
-    assert report.true_positives == 14
+    assert report.total_expected == 11
+    assert report.total_actual == 11
+    assert report.true_positives == 11
     assert report.false_positives == 0
     assert report.false_negatives == 0
     assert report.precision == 100.0
     assert report.recall == 100.0
 
     # Verify per-category results
-    assert report.category_metrics["S3"].expected_count == 3
-    assert report.category_metrics["S3"].true_positives == 3
+    assert report.category_metrics["S3"].expected_count == 2
+    assert report.category_metrics["S3"].true_positives == 2
     assert report.category_metrics["S3"].precision == 100.0
     assert report.category_metrics["S3"].recall == 100.0
 
-    assert report.category_metrics["IAM"].expected_count == 4
-    assert report.category_metrics["IAM"].true_positives == 4
+    assert report.category_metrics["IAM"].expected_count == 3
+    assert report.category_metrics["IAM"].true_positives == 3
     assert report.category_metrics["IAM"].precision == 100.0
     assert report.category_metrics["IAM"].recall == 100.0
 
@@ -73,8 +73,8 @@ def test_perfect_matching():
     assert report.category_metrics["SECURITY_GROUP"].precision == 100.0
     assert report.category_metrics["SECURITY_GROUP"].recall == 100.0
 
-    assert report.category_metrics["MONITORING"].expected_count == 3
-    assert report.category_metrics["MONITORING"].true_positives == 3
+    assert report.category_metrics["MONITORING"].expected_count == 2
+    assert report.category_metrics["MONITORING"].true_positives == 2
     assert report.category_metrics["MONITORING"].precision == 100.0
     assert report.category_metrics["MONITORING"].recall == 100.0
 
